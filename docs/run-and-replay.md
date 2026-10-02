@@ -14,10 +14,10 @@ edges, as described in [reports/0002-architecture.md](../reports/0002-architectu
 
 ```
 jevtrader login
-jevtrader run --watchlist NSE:INFY,NSE:TCS --model <pinned-jev-model-id>
+jevtrader run --watchlist NSE:INFY,NSE:TCS
 ```
 
-Paper trading on live data. It verifies the saved Kite session, resolves the
+Paper trading on live data. The Jev decider uses the pinned model `jev-1.13.0` unless `--model` names another explicit id (`jev-latest` is rejected). It verifies the saved Kite session, resolves the
 watchlist (and the `NSE:NIFTY 50` index, used only as snapshot context),
 records ticks and closed bars under `--data-dir`, and writes every decision
 cycle to the SQLite decision log (`--log`, default `state/decisions.db`).
@@ -32,7 +32,7 @@ wiring behind it anyway. Enabling live trading is a separate, reviewed change.
 
 ```
 jevtrader replay --data-dir data --from 2026-10-05 --to 2026-10-09 \
-  --deciders hold,momentum,jev --model <pinned-jev-model-id>
+  --deciders hold,momentum,jev
 ```
 
 Runs the stored data through the engine once per decider. Each run gets its own

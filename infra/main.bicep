@@ -53,7 +53,7 @@ param githubRepo string = 'sanjeev2040/jev-trader'
 param watchlist string
 
 @description('Pinned Jev model id passed to `jevtrader run --model`.')
-param jevModel string
+param jevModel string = 'jev-1.13.0'
 
 @description('Email address for the action group and the budget alerts.')
 param alertEmail string

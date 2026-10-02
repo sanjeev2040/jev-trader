@@ -68,7 +68,7 @@ Edit `infra/main.local.bicepparam` and replace every `REPLACE_ME`:
 
 - `adminSshPublicKey`: your public key, for example the output of `cat ~/.ssh/id_ed25519.pub`.
 - `operatorCidr`: your public IP as `/32`. This is the only address that can reach SSH. When your IP changes, update the NSG rule (see "Operations").
-- `watchlist` and `jevModel`: the instruments to paper-trade and the pinned Jev model id. The VM refuses to start `run` while `jevModel` is a placeholder.
+- `watchlist` and `jevModel`: the instruments to paper-trade and the pinned Jev model id (`jevModel` defaults to `jev-1.13.0`). The VM refuses to start `run` while `jevModel` is a placeholder.
 - `alertEmail`: where the action group and budget alerts (80% and 100% of $25, plus a 100% forecast) go.
 - Optionally `operatorObjectId` (`az ad signed-in-user show --query id -o tsv`): you then get Key Vault Secrets Officer from the template. Otherwise grant it yourself in step 7.
 

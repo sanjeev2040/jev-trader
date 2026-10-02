@@ -59,7 +59,7 @@ func replayCmd(ctx context.Context, args []string, e env) error {
 	prefix := fs.String("run-prefix", "", "run id prefix; runs are <prefix>-<decider> (default: replay-<UTC time>)")
 	latency := fs.Duration("latency", 0, "decision latency applied to every answer; 0 uses each decision's own (measured or recorded) latency")
 	decideTimeout := fs.Duration("decide-timeout", 5*time.Second, "per-call decider deadline")
-	model := fs.String("model", "", "pinned Jev model id (required for the jev decider)")
+	model := fs.String("model", jev.DefaultModel, "pinned Jev model id for the jev decider (\"jev-latest\" is rejected)")
 	jevURL := fs.String("jev-url", "", "Jev base URL (default: the public API)")
 	horizon := fs.Int("horizon", replay.DefaultHorizon, "bars ahead BUY and SELL calls are scored for calibration")
 	format := fs.String("format", "text", "report format: text or json")
@@ -284,9 +284,6 @@ func buildSpecs(ctx context.Context, names []string, log *decisionlog.Log, secre
 func newJev(secrets config.Secrets, model, baseURL string) (*jev.Client, error) {
 	if err := secrets.RequireJev(); err != nil {
 		return nil, err
-	}
-	if model == "" {
-		return nil, errors.New("--model is required for the jev decider (pin an explicit model id)")
 	}
 	return jev.New(jev.Config{APIKey: secrets.JevAPIKey.Reveal(), Model: model, BaseURL: baseURL})
 }

@@ -200,9 +200,9 @@ There is no external message bus. Components talk over Go channels inside one pr
 - The builder is a pure function of bars, position and session time.
 
 **`jev` + `decide` (#7).**
-- **Requests.** `jev.Client` sends two `choice` questions: `action` ∈ {BUY, SELL, HOLD} and `size` ∈ {S, M, L}.
+- **Requests.** `jev.Client` sends two `choice` questions in the request's `questions` map, keyed `action` ∈ {BUY, SELL, HOLD} and `size` ∈ {S, M, L}. Each carries structured `instructions` and per-option `criteria` {what, not_for, examples}; answers come back in an `answers` map under the same keys.
 - **Answers.** It returns a `domain.Decision` with the action, size bucket, the chosen probability, the full distribution, the model id echoed by the server, token usage and latency.
-- **Model.** Pin an explicit model id in config, not `jev-latest`, so a server-side model upgrade is a visible config change.
+- **Model.** Pin an explicit model id in config (default `jev-1.13.0`), not `jev-latest`, so a server-side model upgrade is a visible config change.
 - **Retries.** Retry 429/529 only while the call's deadline still has room.
 - **HOLD on failure.** `decide.HoldOnFailure` wraps any Decider and turns every failure into `HOLD` with a reason code (`timeout`, `http_4xx`, `http_5xx`, `rate_limited`, `invalid_answer`, `circuit_open`):
   - an error;

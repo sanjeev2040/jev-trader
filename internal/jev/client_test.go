@@ -1,9 +1,12 @@
 package jev
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,7 +20,7 @@ import (
 
 const (
 	testKey   = "test-key-not-a-secret"
-	testModel = "jev-2026-09-01"
+	testModel = "jev-1.13.0"
 )
 
 func fixture(t *testing.T, name string) []byte {
@@ -60,8 +63,8 @@ func answerWith(t *testing.T, action string) []byte {
 	if err := json.Unmarshal([]byte(action), &a); err != nil {
 		t.Fatal(err)
 	}
-	answers := resp["answers"].([]any)
-	answers[0] = a
+	answers := resp["answers"].(map[string]any)
+	answers["action"] = a
 	b, err := json.Marshal(resp)
 	if err != nil {
 		t.Fatal(err)
@@ -88,8 +91,9 @@ func TestDecideSendsTypedRequestAndParsesAnswer(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer "+testKey {
 			t.Errorf("Authorization = %q", got)
 		}
+		raw, _ := io.ReadAll(r.Body)
 		var req request
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := json.Unmarshal(raw, &req); err != nil {
 			t.Errorf("decode request: %v", err)
 		}
 		if req.Model != testModel {
@@ -98,12 +102,34 @@ func TestDecideSendsTypedRequestAndParsesAnswer(t *testing.T) {
 		if !jsonEqual(t, req.State, state) {
 			t.Errorf("state = %s, want %s", req.State, state)
 		}
-		if len(req.Questions) != 2 ||
-			req.Questions[0].ID != "action" || req.Questions[0].Type != "choice" ||
-			strings.Join(req.Questions[0].Options, ",") != "BUY,SELL,HOLD" ||
-			req.Questions[1].ID != "size" || req.Questions[1].Type != "choice" ||
-			strings.Join(req.Questions[1].Options, ",") != "S,M,L" {
-			t.Errorf("questions = %+v", req.Questions)
+		// questions is a map keyed by id, not an array.
+		var shape struct {
+			Questions map[string]struct {
+				Type         string                    `json:"type"`
+				Instructions map[string]any            `json:"instructions"`
+				Criteria     map[string]map[string]any `json:"criteria"`
+			} `json:"questions"`
+		}
+		if err := json.Unmarshal(raw, &shape); err != nil {
+			t.Fatalf("questions are not a map: %v\n%s", err, raw)
+		}
+		for id, want := range map[string][]string{"action": {"BUY", "SELL", "HOLD"}, "size": {"S", "M", "L"}} {
+			q, ok := shape.Questions[id]
+			if !ok || q.Type != "choice" || q.Instructions["question"] == "" || q.Instructions["question"] == nil {
+				t.Errorf("question %q = %+v", id, q)
+			}
+			if len(q.Criteria) != len(want) {
+				t.Errorf("question %q criteria = %v, want options %v", id, q.Criteria, want)
+			}
+			for _, opt := range want {
+				c, ok := q.Criteria[opt]
+				if !ok || c["what"] == nil || c["not_for"] == nil {
+					t.Errorf("question %q option %q criterion = %v, want what and not_for", id, opt, c)
+				}
+			}
+		}
+		if len(shape.Questions) != 2 {
+			t.Errorf("questions = %d, want 2", len(shape.Questions))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(answer)
@@ -120,7 +146,7 @@ func TestDecideSendsTypedRequestAndParsesAnswer(t *testing.T) {
 	if d.Probabilities[domain.ActionHold] != 0.30 || d.SizeProbabilities[domain.SizeL] != 0.20 {
 		t.Errorf("distributions = %v %v", d.Probabilities, d.SizeProbabilities)
 	}
-	if d.Model != testModel || d.InputTokens != 187 || d.Latency <= 0 || d.HoldReason != "" {
+	if d.Model != testModel || d.InputTokens != 187 || d.OutputTokens != 0 || d.Latency <= 0 || d.HoldReason != "" {
 		t.Errorf("metadata = model %q tokens %d latency %v hold %q", d.Model, d.InputTokens, d.Latency, d.HoldReason)
 	}
 	if !jsonEqual(t, d.Raw, answer) {
@@ -141,19 +167,21 @@ func jsonEqual(t *testing.T, a, b []byte) bool {
 
 func TestDecideInvalidAnswers(t *testing.T) {
 	tests := map[string][]byte{
-		"not json":       []byte(`{"answers":`),
-		"missing answer": []byte(`{"model":"m","answers":[]}`),
-		"unknown option": answerWith(t, `{"id":"action","type":"choice","choice":"SHORT","probabilities":{"SHORT":1}}`),
+		"not json":            []byte(`{"answers":`),
+		"missing answer":      []byte(`{"model":"m","answers":{}}`),
+		"missing size answer": []byte(`{"model":"m","answers":{"action":{"type":"choice","choice":"HOLD","probabilities":{"HOLD":1}}}}`),
+		"answers as an array": []byte(`{"model":"m","answers":[{"id":"action","type":"choice","choice":"BUY","probabilities":{"BUY":1}}]}`),
+		"unknown option":      answerWith(t, `{"type":"choice","choice":"SHORT","probabilities":{"SHORT":1}}`),
 		"unknown probability key": answerWith(t,
-			`{"id":"action","type":"choice","choice":"BUY","probabilities":{"BUY":0.5,"SELL":0.2,"WAIT":0.3}}`),
+			`{"type":"choice","choice":"BUY","probabilities":{"BUY":0.5,"SELL":0.2,"WAIT":0.3}}`),
 		"chosen option without probability": answerWith(t,
-			`{"id":"action","type":"choice","choice":"BUY","probabilities":{"SELL":0.5,"HOLD":0.5}}`),
+			`{"type":"choice","choice":"BUY","probabilities":{"SELL":0.5,"HOLD":0.5}}`),
 		"probabilities do not sum to 1": answerWith(t,
-			`{"id":"action","type":"choice","choice":"BUY","probabilities":{"BUY":0.6,"SELL":0.3,"HOLD":0.3}}`),
+			`{"type":"choice","choice":"BUY","probabilities":{"BUY":0.6,"SELL":0.3,"HOLD":0.3}}`),
 		"probability out of range": answerWith(t,
-			`{"id":"action","type":"choice","choice":"BUY","probabilities":{"BUY":1.5,"SELL":-0.5,"HOLD":0}}`),
+			`{"type":"choice","choice":"BUY","probabilities":{"BUY":1.5,"SELL":-0.5,"HOLD":0}}`),
 		"wrong answer type": answerWith(t,
-			`{"id":"action","type":"score","choice":"BUY","probabilities":{"BUY":1}}`),
+			`{"type":"score","choice":"BUY","probabilities":{"BUY":1}}`),
 	}
 	for name, body := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -303,7 +331,6 @@ func TestDecideRejectsInvalidState(t *testing.T) {
 func TestNewValidatesConfig(t *testing.T) {
 	tests := map[string]Config{
 		"no key":     {Model: testModel},
-		"no model":   {APIKey: testKey},
 		"jev-latest": {APIKey: testKey, Model: "jev-latest"},
 	}
 	for name, cfg := range tests {
@@ -311,9 +338,12 @@ func TestNewValidatesConfig(t *testing.T) {
 			t.Errorf("%s: New succeeded, want error", name)
 		}
 	}
-	c, err := New(Config{APIKey: testKey, Model: testModel})
+	c, err := New(Config{APIKey: testKey})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if DefaultModel != "jev-1.13.0" || c.model != DefaultModel {
+		t.Errorf("default model = %q, want jev-1.13.0", c.model)
 	}
 	if c.url != DefaultBaseURL+"/v1/systemone" || c.timeout != DefaultTimeout || c.maxAttempts != DefaultMaxAttempts {
 		t.Errorf("defaults = %+v", c)
@@ -328,5 +358,27 @@ func TestErrorsDoNotLeakAPIKey(t *testing.T) {
 	_, err := newClient(t, srv.URL, nil).Decide(context.Background(), fixture(t, "state.json"))
 	if err == nil || strings.Contains(err.Error(), testKey) {
 		t.Errorf("err = %v", err)
+	}
+}
+
+func TestDecideLogsResponseModelAndUsage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(fixture(t, "answer_ok.json"))
+	}))
+	defer srv.Close()
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	c := newClient(t, srv.URL, func(cfg *Config) { cfg.Logger = logger })
+	if _, err := c.Decide(context.Background(), fixture(t, "state.json")); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{"model=jev-1.13.0", "input_tokens=187", "output_tokens=0"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log %q missing %q", out, want)
+		}
+	}
+	if strings.Contains(out, testKey) {
+		t.Errorf("log leaks the API key: %q", out)
 	}
 }
