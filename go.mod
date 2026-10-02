@@ -7,6 +7,7 @@ require (
 	github.com/parquet-go/parquet-go v0.32.0
 	github.com/zerodha/gokiteconnect/v4 v4.4.3
 	golang.org/x/time v0.8.0
+	modernc.org/sqlite v1.40.0
 )
 
 require (
@@ -29,5 +30,4 @@ require (
 	modernc.org/libc v1.66.10 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.40.0 // indirect
 )
