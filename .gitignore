@@ -1,0 +1,5 @@
+# Secrets and local runtime state (reports/0002-architecture.md)
+.env
+config.yaml
+data/
+state/
