@@ -1,0 +1,115 @@
+name: Market hours
+
+# Starts the VM each NSE trading morning. Azure auto-shutdown deallocates it
+# at 16:00 IST, so nothing here stops it. Scheduled workflows run on the
+# default branch (dev). See deploy/README.md.
+
+on:
+  schedule:
+    # 02:45 UTC = 08:15 IST, Monday to Friday. The early start absorbs
+    # GitHub's cron delay; the operator logs in to Kite before 09:00.
+    - cron: "45 2 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Start the VM even if the calendar says the market is closed (for example a weekend special session)."
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: market-hours
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Is the market open today?
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      configured: ${{ steps.configured.outputs.ready }}
+      open: ${{ steps.day.outputs.open }}
+    steps:
+      - id: configured
+        env:
+          TENANT: ${{ vars.AZURE_TENANT_ID }}
+          SUBSCRIPTION: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          RESOURCE_GROUP: ${{ vars.RESOURCE_GROUP }}
+          VM_NAME: ${{ vars.VM_NAME }}
+        run: |
+          missing=""
+          for v in TENANT SUBSCRIPTION RESOURCE_GROUP VM_NAME; do
+            [ -n "${!v}" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Start skipped::Azure is not configured yet (unset repository variables:$missing). See deploy/README.md."
+            echo "Start skipped: Azure is not configured yet (unset:$missing). See deploy/README.md." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.configured.outputs.ready == 'true'
+
+      - uses: actions/setup-go@v5
+        if: steps.configured.outputs.ready == 'true'
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # The IST date, not the runner's UTC date: they match at 02:45 UTC, but
+      # a long cron delay must not flip the day.
+      - id: day
+        if: steps.configured.outputs.ready == 'true'
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          go build -o "$RUNNER_TEMP/tradingday" ./cmd/tradingday
+          set +e
+          "$RUNNER_TEMP/tradingday" -github-output "$GITHUB_OUTPUT" | tee -a "$GITHUB_STEP_SUMMARY"
+          status=${PIPESTATUS[0]}
+          set -e
+          case "$status" in
+            0) ;;
+            1)
+              if [ "$FORCE" = "true" ]; then
+                echo "force is set: starting anyway." | tee -a "$GITHUB_STEP_SUMMARY"
+                echo "open=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "Market closed today: the VM stays deallocated." | tee -a "$GITHUB_STEP_SUMMARY"
+              fi
+              ;;
+            *) echo "::error::trading-day check failed"; exit "$status" ;;
+          esac
+
+  start:
+    name: Start the VM
+    needs: check
+    if: needs.check.outputs.configured == 'true' && needs.check.outputs.open == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: market-hours
+    steps:
+      - name: Log in to Azure (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # `az vm start` on a running VM is a no-op, so a manual re-run is safe.
+      - name: Start the VM
+        env:
+          RESOURCE_GROUP: ${{ vars.RESOURCE_GROUP }}
+          VM_NAME: ${{ vars.VM_NAME }}
+        run: |
+          az vm start --resource-group "$RESOURCE_GROUP" --name "$VM_NAME" --output none
+          state=$(az vm get-instance-view --resource-group "$RESOURCE_GROUP" --name "$VM_NAME" \
+            --query "instanceView.statuses[?starts_with(code,'PowerState/')].code | [0]" --output tsv)
+          echo "$VM_NAME is $state" | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$state" = "PowerState/running" ]

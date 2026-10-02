@@ -6,3 +6,6 @@ state/
 
 # Build output.
 /jevtrader
+
+# Local deployment parameters (hold your IP and email).
+infra/*.local.bicepparam

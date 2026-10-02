@@ -7,6 +7,7 @@ require (
 	github.com/parquet-go/parquet-go v0.32.0
 	github.com/zerodha/gokiteconnect/v4 v4.4.3
 	golang.org/x/time v0.8.0
+	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.40.0
 )
 

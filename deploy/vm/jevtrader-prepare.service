@@ -1,0 +1,20 @@
+[Unit]
+Description=jevtrader: pull the tagged image and load secrets
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+RuntimeDirectory=jevtrader
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+ExecStart=/usr/local/lib/jevtrader/prepare.sh
+Restart=on-failure
+RestartSec=30
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target

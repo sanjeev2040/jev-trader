@@ -1,0 +1,49 @@
+# NSE equity-segment trading calendar read by .github/workflows/market-hours.yml
+# (through `go run ./cmd/tradingday`). The VM is started only on trading days.
+#
+# - holidays: weekday closures. Weekends are always closed and need no entry.
+# - extra_sessions: weekend days with a regular daytime session. The cron only
+#   fires Monday to Friday, so start the VM for these by hand with
+#   workflow_dispatch (force: true).
+# - years_complete: years whose holiday list is the full NSE circular. A date
+#   in any other year still starts the VM on weekdays, with a warning, so a
+#   forgotten yearly update costs a few idle VM-days instead of a missed session.
+# - verified: false marks a date taken from the calendar rather than from the
+#   NSE circular. Check it when NSE publishes the next list (usually December).
+#
+# Update procedure: add the next year's holidays from the NSE "Trading Holidays"
+# circular, set verified: true, add the year to years_complete.
+#
+# Muhurat trading (Diwali, 2026-11-08, a Sunday) is an evening session. Auto-
+# shutdown deallocates the VM at 16:00 IST, so it is not covered here.
+
+years_complete: [2026]
+
+# 2026: https://zerodha.com/marketintel/holiday-calendar/ (read 2026-10-02),
+# matching the 16 weekday closures in reports/0003-deployment.md.
+holidays:
+  - {date: "2026-01-15", name: "Municipal Corporation Elections in Maharashtra", verified: true}
+  - {date: "2026-01-26", name: "Republic Day", verified: true}
+  - {date: "2026-03-03", name: "Holi", verified: true}
+  - {date: "2026-03-26", name: "Shri Ram Navami", verified: true}
+  - {date: "2026-03-31", name: "Shri Mahavir Jayanti", verified: true}
+  - {date: "2026-04-03", name: "Good Friday", verified: true}
+  - {date: "2026-04-14", name: "Dr. Baba Saheb Ambedkar Jayanti", verified: true}
+  - {date: "2026-05-01", name: "Maharashtra Day", verified: true}
+  - {date: "2026-05-28", name: "Bakri Eid", verified: true}
+  - {date: "2026-06-26", name: "Moharram", verified: true}
+  - {date: "2026-09-14", name: "Ganesh Chaturthi", verified: true}
+  - {date: "2026-10-02", name: "Mahatma Gandhi Jayanti", verified: true}
+  - {date: "2026-10-20", name: "Dussehra", verified: true}
+  - {date: "2026-11-10", name: "Diwali-Balipratipada", verified: true}
+  - {date: "2026-11-24", name: "Prakash Gurpurb Sri Guru Nanak Dev", verified: true}
+  - {date: "2026-12-25", name: "Christmas", verified: true}
+  # 2027: NSE has not published the list yet. These weekday dates are computed
+  # from the calendar, not read from a circular. 2027 is not in years_complete,
+  # so the other holidays (Holi, Eid, Ram Navami, Diwali, ...) must still be
+  # added when the circular appears.
+  - {date: "2027-01-26", name: "Republic Day", verified: false}
+  - {date: "2027-03-26", name: "Good Friday", verified: false}
+  - {date: "2027-04-14", name: "Dr. Baba Saheb Ambedkar Jayanti", verified: false}
+
+extra_sessions: []
