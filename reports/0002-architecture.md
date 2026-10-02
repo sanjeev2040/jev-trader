@@ -102,7 +102,7 @@ The module is `github.com/sanjeev2040/jev-trader`. Everything except `cmd/` live
 | `internal/decide` | `Decider` interface, the HOLD-on-failure wrapper, and baseline deciders (#7, #10). |
 | `internal/risk` | Deterministic gate, kill switch, square-off scheduler. Mints `risk.Approval` (#8). |
 | `internal/orders` | Order manager, the `Broker` interface, `orders/paper` and `orders/kite` (#9). |
-| `internal/decisionlog` | Append-only record of every decision cycle in SQLite. Can replay recorded answers (#10). |
+| `internal/decisionlog` | Append-only record of every decision cycle and its order events in SQLite. Can replay recorded answers (#10). |
 | `internal/engine` | The event loop that composes all of the above, shared by `run` and `replay` (#10). |
 | `internal/replay` | Backtest driver and evaluation report against baselines (#10). |
 
@@ -127,7 +127,7 @@ type Clock interface {
 
 // decide
 type Decider interface {
-    Decide(ctx context.Context, s snapshot.Snapshot) (domain.Decision, error)
+    Decide(ctx context.Context, state json.RawMessage) (domain.Decision, error) // encoded snapshot.Snapshot
 }
 
 // orders
@@ -155,7 +155,7 @@ There is no external message bus. Components talk over Go channels inside one pr
 1. **Ingest.** The Kite adapter's `OnTick` callback converts packets into `domain.Tick`s and sends them on a buffered channel. The WebSocket reader must never block. If the channel is full, the tick is dropped and a drop counter is incremented and alerted on. A drop is a defect to fix, not a normal state.
 2. **Tee.** The engine forwards each tick to the **recorder** goroutine on its own buffered channel. The recorder writes ticks to Parquet, so recording is off the decision path.
 3. **Bars.** The engine feeds ticks to `bars.Builder`. A bar closes when the event time passes its end. The clock also triggers a close after a short grace period, so illiquid symbols still close on time. Closed bars go to the bar store and to step 4.
-4. **Snapshot and decide.** On a bar close (default: 1m) for an instrument with no decision in flight, the engine builds a `snapshot.Snapshot`. It then starts one goroutine that calls `Decider.Decide` with a per-call deadline (default 800 ms, configurable). A semaphore caps concurrent Jev calls (default 8). The result returns to the engine on a results channel.
+4. **Snapshot and decide.** On a bar close (default: 1m) for an instrument with no decision in flight, the engine builds a `snapshot.Snapshot` and encodes it to JSON. It then starts one goroutine that calls `Decider.Decide` with a per-call deadline (default 800 ms, configurable). A semaphore caps concurrent Jev calls (default 8). The result returns to the engine on a results channel.
 5. **Risk.** The engine passes each `Decision` to `risk.Gate.Evaluate` with the current book and the time. The gate returns a verdict. If an order is warranted, the verdict carries a `risk.Approval`.
 6. **Orders.** The engine passes approvals to `orders.Manager.Submit`. Broker `Updates()` flow back into the engine loop and update positions. Positions feed the risk book and the next snapshot.
 7. **Log.** The engine writes one decision record per cycle synchronously, *before* it submits any order: the snapshot, the raw Jev answer, latency, verdict and intent. A crash after the write can then be reconciled; a crash before it leaves nothing to reconcile. SQLite WAL inserts take about a millisecond, far inside a 1-minute bar.
@@ -204,14 +204,14 @@ There is no external message bus. Components talk over Go channels inside one pr
 - **Answers.** It returns a `domain.Decision` with the action, size bucket, the chosen probability, the full distribution, the model id echoed by the server, token usage and latency.
 - **Model.** Pin an explicit model id in config, not `jev-latest`, so a server-side model upgrade is a visible config change.
 - **Retries.** Retry 429/529 only while the call's deadline still has room.
-- **HOLD on failure.** `decide.HoldOnFailure` wraps any Decider and turns every failure into `HOLD` with a reason code (`timeout`, `http_5xx`, `rate_limited`, `invalid_answer`, `circuit_open`):
+- **HOLD on failure.** `decide.HoldOnFailure` wraps any Decider and turns every failure into `HOLD` with a reason code (`timeout`, `http_4xx`, `http_5xx`, `rate_limited`, `invalid_answer`, `circuit_open`):
   - an error;
   - a passed deadline;
   - a 4xx;
   - an unknown option;
   - probabilities that do not sum to about 1.
 - **Circuit breaker.** After N consecutive failures, it stops calling Jev for a cool-down period and returns HOLD.
-- `jev` takes the encoded snapshot as `json.RawMessage`, so the client can be built and tested before #6 lands.
+- `jev` and `Decider` take the encoded snapshot as `json.RawMessage`, so `decide` imports only `domain` and both can be built and tested before #6 lands.
 
 **`risk` (#8).**
 - **Pure core.** `Evaluate(decision, book, limits, now) Verdict` has no I/O. Its stateful parts are the order-rate window and the kill-switch flag; both live in the engine-owned book.
@@ -244,13 +244,15 @@ There is no external message bus. Components talk over Go channels inside one pr
   - It is compiled in but refuses to start unless `live.enabled: true` is set in config *and* `--mode=live` is passed. The first live enablement is a separately reviewed change.
 
 **`decisionlog` + `replay` + `engine` (#10).**
-- **Records.** One row per decision cycle:
-  - run id, mode, instrument alias and symbol;
-  - bar close time;
-  - snapshot JSON and schema version;
-  - model id, raw answer, latency and HOLD reason;
-  - risk verdict and reasons;
-  - intent, client id, broker id, fills and costs.
+- **Records.** The log is append-only; rows are never updated.
+  - One decision row per cycle, written before any order is submitted:
+    - run id, mode, instrument alias and symbol;
+    - bar close time;
+    - snapshot JSON and schema version;
+    - model id, raw answer, latency and HOLD reason;
+    - risk verdict and reasons;
+    - intent and client id.
+  - One order-event row per broker update, keyed by the client id: ack, broker id, rejection, partial or full fill, and costs.
 - **Storage.** SQLite in WAL mode via the pure-Go `modernc.org/sqlite`, with no cgo. It is exported to Parquet for analysis.
 - **Replay.** Replays stored ticks, or bars backfilled over REST, through the engine with the simulated clock. It writes its own decision-log run.
 - **Evaluation report.** Compares Jev against always-HOLD and a simple momentum rule on PnL after costs, hit rate, drawdown, turnover and calibration (predicted probability vs realized outcome).
@@ -289,7 +291,7 @@ TimescaleDB, considered in 0001, is **deferred**. It adds a server to operate, a
 | Issue | Packages | Hard dependencies | Can start against |
 | --- | --- | --- | --- |
 | #3 Kite auth | `kiteauth`, `config` (secrets), `cmd login` | none | — |
-| #4 Ingestion | `marketdata`, `marketdata/kite`, `store` (tick writer), `cmd record` | #3 for a live token | `domain.Tick` (this report) and a stub token provider |
+| #4 Ingestion | `marketdata`, `marketdata/kite`, `store` (tick writer), `cmd record` | none for code; #3 for a live token | `domain.Tick` (this report) and a stub token provider |
 | #5 Bars and storage | `bars`, `store` (bar writer, tick and bar readers), `cmd backfill` | none for code | fixture ticks |
 | #6 Snapshot schema | `snapshot` | none for code | `domain.Bar` and `domain.Position` (this report) |
 | #7 Jev client | `jev`, `decide` (`HoldOnFailure`) | none | encoded fixture states and an `httptest` fake |
@@ -299,10 +301,11 @@ TimescaleDB, considered in 0001, is **deferred**. It adds a server to operate, a
 
 ```mermaid
 flowchart LR
-  I3["#3 auth"] --> I4["#4 ingest"]
+  I3["#3 auth"] -. live only .-> I4["#4 ingest"]
   I3 -. live only .-> I9
   I4 --> I10
-  I5["#5 bars"] --> I6["#6 snapshot"]
+  I5["#5 bars"] -. integration only .-> I6["#6 snapshot"]
+  I5 --> I10
   I6 --> I10["#10 log, engine, replay"]
   I7["#7 Jev"] --> I10
   I8["#8 risk"] --> I9["#9 orders"]
@@ -314,7 +317,7 @@ flowchart LR
 - **#9** can start in wave 1 against the `Approval` contract, but merges after #8.
 - **#10** is the integration issue and lands last.
 
-The solid edges in the graph are integration and merge-order dependencies. The dashed edge means #9 needs #3 only for live trading. Every package's unit tests run on fixtures, without a Kite account or a Jev key.
+The solid edges in the graph are contract and merge-order dependencies. The dashed edges are needed only for live use or integration testing: #4 and #9 need #3 only for a live token, and #6 needs only the `domain.Bar` and `domain.Position` types, not #5's code. Every package's unit tests run on fixtures, without a Kite account or a Jev key.
 
 `internal/domain` is created by the first wave-1 PR to merge, copying the type list above. Its fields are settled in that PR's review, and later PRs rebase onto it. Recording ticks early (#4's `record`) matters, because #10's replay needs real recorded sessions.
 
@@ -343,7 +346,7 @@ The solid edges in the graph are integration and merge-order dependencies. The d
 
 - **One binary and one engine.** Live, paper and replay differ only in four injected interfaces plus one replay flag. That makes the backtest meaningful and keeps the code small.
 - **Risk authority is enforced by the compiler.** `risk.Approval` is the only type `orders` accepts. Any new path to a broker has to go through the gate.
-- **Most issues can be built in parallel.** #3–#8 are independent, #9 has one contract dependency, and #10 integrates. The cost is that `domain` types and the four interfaces above are a contract, and changing them needs a note in this report or a successor.
+- **Most issues can be built in parallel.** #3–#8 can all be built in parallel, #9 has a contract dependency on #8, and #10 integrates all of them. The cost is that `domain` types and the four interfaces above are a contract, and changing them needs a note in this report or a successor.
 - **Storage is files, not servers.** Parquet and SQLite need no operations work and are Python-readable. Querying across hosts or across many days is left to DuckDB, Polars or a later database.
 - **Operator duties are explicit.** There is a daily manual login, a static-IP VM for live trading, and a reviewed change to enable live mode.
 - **Backtests are not proof of edge** while the model's training cutoff is unknown. Paper trading forward in time is the deciding evidence before live enablement.
