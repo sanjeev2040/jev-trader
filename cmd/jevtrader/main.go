@@ -28,6 +28,8 @@ var commands = map[string]command{
 	"backfill": {summary: "fetch historical 1m candles from Kite and store them as bars", run: runBackfill},
 	"login":    {summary: "daily Kite Connect login; saves the access token", run: runLogin},
 	"record":   {summary: "ingest Kite ticks and persist them to Parquet (no trading)", run: runRecord},
+	"replay":   {summary: "replay stored data through the trading engine and report against baselines", run: runReplay},
+	"run":      {summary: "trade in paper mode on live Kite data (--mode=live is gated off)", run: runTrade},
 }
 
 func main() {
