@@ -1,6 +1,6 @@
 # 0001 — Implementation language
 
-- **Status:** Proposed
+- **Status:** Accepted (Go), 2026-10-02
 - **Date:** 2026-10-02
 - **Issue:** [#1](https://github.com/sanjeev2040/jev-trader/issues/1)
 - **Decider:** repository owner (after review of this report)
@@ -140,4 +140,4 @@ All repository data was read from GitHub, crates.io, PyPI and the Go module prox
 
 ## Status
 
-**Proposed.** The repository owner makes the final pick after review. On acceptance, change this field to `Accepted (Go)`, or to the chosen alternative, and date it.
+**Accepted (Go)** on 2026-10-02. The repository owner accepted the Go recommendation when commissioning the architecture decision ([0002](0002-architecture.md), issue [#2](https://github.com/sanjeev2040/jev-trader/issues/2)).
