@@ -1,0 +1,12 @@
+[Unit]
+Description=jevtrader: nightly backup after the NSE close
+
+[Timer]
+# 15:40 IST: ten minutes after the close and 20 minutes before Azure
+# auto-shutdown deallocates the VM at 16:00. Not Persistent: the VM is off
+# between sessions and a catch-up run at boot would add nothing.
+OnCalendar=*-*-* 15:40:00 Asia/Kolkata
+Persistent=false
+
+[Install]
+WantedBy=timers.target

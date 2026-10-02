@@ -1,6 +1,6 @@
 # 0003 — Azure deployment that runs only during NSE market hours
 
-- **Status:** Proposed
+- **Status:** Accepted (option B)
 - **Date:** 2026-10-02
 - **Issue:** [#23](https://github.com/sanjeev2040/jev-trader/issues/23)
 - **Depends on:** [0002 — System architecture](0002-architecture.md) (Accepted)
@@ -214,4 +214,4 @@ Infrastructure is created in #24 from the captain's own `az login`. CI gets no r
 
 ## Status
 
-**Proposed** on 2026-10-02. Accept it to start #24 on the VM design. Reject it, or ask for a different weighting of cost against the login and storage constraints, to reopen the comparison.
+**Accepted (option B)** on 2026-10-02: the repository owner chose the VM option. Implementation is #24; the setup steps are in [deploy/README.md](../deploy/README.md).

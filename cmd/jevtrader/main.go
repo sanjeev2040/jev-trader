@@ -30,6 +30,7 @@ var commands = map[string]command{
 	"record":   {summary: "ingest Kite ticks and persist them to Parquet (no trading)", run: runRecord},
 	"replay":   {summary: "replay stored data through the trading engine and report against baselines", run: runReplay},
 	"run":      {summary: "trade in paper mode on live Kite data (--mode=live is gated off)", run: runTrade},
+	"version":  {summary: "print the build version (the git SHA stamped into the image)", run: runVersion},
 }
 
 func main() {
