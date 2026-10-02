@@ -25,7 +25,8 @@ type env struct {
 }
 
 var commands = map[string]command{
-	"login": {summary: "daily Kite Connect login; saves the access token", run: runLogin},
+	"login":  {summary: "daily Kite Connect login; saves the access token", run: runLogin},
+	"record": {summary: "ingest Kite ticks and persist them to Parquet (no trading)", run: runRecord},
 }
 
 func main() {
@@ -59,4 +60,8 @@ func usage(w io.Writer) {
 	for _, name := range names {
 		fmt.Fprintf(w, "  %-10s %s\n", name, commands[name].summary)
 	}
+}
+
+func runRecord(_ context.Context, args []string, e env) int {
+	return record(args, e.stderr)
 }
