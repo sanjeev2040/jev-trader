@@ -78,6 +78,43 @@ func TestNewRejectsBadConfig(t *testing.T) {
 	if _, err := paper.New(&fixedClock{}, paper.Config{SlippageBps: -1}); err == nil {
 		t.Error("negative slippage accepted")
 	}
+	if _, err := paper.New(&fixedClock{}, paper.Config{Latency: -time.Millisecond}); err == nil {
+		t.Error("negative latency accepted")
+	}
+}
+
+func TestLatencyDelaysTickFills(t *testing.T) {
+	b, _ := newBroker(t, paper.Config{Latency: 250 * time.Millisecond})
+	place(t, b, intent("c1", domain.ActionBuy, domain.OrderTypeMarket, 0))
+	if ack := drain(b); len(ack) != 1 || !ack[0].Time.Equal(t0) {
+		t.Fatalf("ack = %+v, want one at the order time", ack)
+	}
+	b.OnTick(tick(100, t0.Add(100*time.Millisecond)))
+	b.OnTick(tick(100, t0.Add(250*time.Millisecond)))
+	if u := drain(b); len(u) != 0 {
+		t.Fatalf("filled within latency: %+v", u)
+	}
+	b.OnTick(tick(101, t0.Add(251*time.Millisecond)))
+	if u := drain(b); len(u) != 1 || u[0].AveragePrice != 101 {
+		t.Fatalf("updates = %+v, want fill at 101", u)
+	}
+}
+
+func TestLatencyDelaysBarFills(t *testing.T) {
+	bar := func(start time.Time, price float64) domain.Bar {
+		return domain.Bar{Instrument: infy, Interval: time.Second, Start: start, End: start.Add(time.Second), Open: price, High: price, Low: price, Close: price}
+	}
+	b, _ := newBroker(t, paper.Config{Latency: 2 * time.Second})
+	place(t, b, intent("c1", domain.ActionBuy, domain.OrderTypeMarket, 0))
+	drain(b)
+	b.OnBar(bar(t0.Add(time.Second), 100))
+	if u := drain(b); len(u) != 0 {
+		t.Fatalf("filled from a bar inside the latency: %+v", u)
+	}
+	b.OnBar(bar(t0.Add(2*time.Second), 102))
+	if u := drain(b); len(u) != 1 || u[0].AveragePrice != 102 {
+		t.Fatalf("updates = %+v, want fill at 102", u)
+	}
 }
 
 func TestPlaceAcksAndFillsOnFirstLaterTick(t *testing.T) {
@@ -229,17 +266,17 @@ func TestPlaceRejects(t *testing.T) {
 	ctx := context.Background()
 	o := intent("c1", domain.ActionBuy, domain.OrderTypeMarket, 0)
 	place(t, b, o)
-	if _, err := b.Place(ctx, o); !errors.Is(err, paper.ErrDuplicateTag) {
+	if _, err := b.Place(ctx, o); !errors.Is(err, paper.ErrDuplicateTag) || !errors.Is(err, orders.ErrNotPlaced) {
 		t.Errorf("duplicate: err = %v", err)
 	}
 	unprotected := intent("c2", domain.ActionBuy, domain.OrderTypeMarket, 0)
 	unprotected.MarketProtection = 0
-	if _, err := b.Place(ctx, unprotected); !errors.Is(err, orders.ErrInvalidIntent) {
+	if _, err := b.Place(ctx, unprotected); !errors.Is(err, orders.ErrInvalidIntent) || !errors.Is(err, orders.ErrNotPlaced) {
 		t.Errorf("unprotected market: err = %v", err)
 	}
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := b.Place(cancelled, intent("c3", domain.ActionBuy, domain.OrderTypeMarket, 0)); !errors.Is(err, context.Canceled) {
+	if _, err := b.Place(cancelled, intent("c3", domain.ActionBuy, domain.OrderTypeMarket, 0)); !errors.Is(err, context.Canceled) || !errors.Is(err, orders.ErrNotPlaced) {
 		t.Errorf("cancelled ctx: err = %v", err)
 	}
 }
@@ -250,8 +287,8 @@ func TestPlaceRefusesWhenUpdatesCouldBlock(t *testing.T) {
 	place(t, b, intent("c1", domain.ActionBuy, domain.OrderTypeLimit, 90))
 	// One ack is queued and c1 can still produce one update: one free slot
 	// is not enough for c2's ack and its future update.
-	if _, err := b.Place(ctx, intent("c2", domain.ActionBuy, domain.OrderTypeLimit, 90)); !errors.Is(err, paper.ErrUpdateBacklog) {
-		t.Fatalf("err = %v, want ErrUpdateBacklog", err)
+	if _, err := b.Place(ctx, intent("c2", domain.ActionBuy, domain.OrderTypeLimit, 90)); !errors.Is(err, paper.ErrUpdateBacklog) || !errors.Is(err, orders.ErrNotPlaced) {
+		t.Fatalf("err = %v, want ErrUpdateBacklog and ErrNotPlaced", err)
 	}
 	drain(b)
 	place(t, b, intent("c2", domain.ActionBuy, domain.OrderTypeLimit, 90))

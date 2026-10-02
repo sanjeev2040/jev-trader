@@ -130,8 +130,8 @@ func TestPlaceRejectsInvalidIntentLocally(t *testing.T) {
 	defer b.Close()
 	bad := intent("c1", domain.OrderTypeMarket)
 	bad.MarketProtection = 0
-	if _, err := b.Place(context.Background(), bad); !errors.Is(err, orders.ErrInvalidIntent) {
-		t.Fatalf("err = %v, want ErrInvalidIntent", err)
+	if _, err := b.Place(context.Background(), bad); !errors.Is(err, orders.ErrInvalidIntent) || !errors.Is(err, orders.ErrNotPlaced) {
+		t.Fatalf("err = %v, want ErrInvalidIntent and ErrNotPlaced", err)
 	}
 	if len(api.placed) != 0 {
 		t.Fatal("invalid intent reached the API")
@@ -143,8 +143,8 @@ func TestPlaceAndCancelErrors(t *testing.T) {
 	b := newBroker(Config{}, api)
 	defer b.Close()
 	ctx := context.Background()
-	if _, err := b.Place(ctx, intent("c1", domain.OrderTypeLimit)); err == nil {
-		t.Error("Place swallowed the API error")
+	if _, err := b.Place(ctx, intent("c1", domain.OrderTypeLimit)); err == nil || errors.Is(err, orders.ErrNotPlaced) {
+		t.Errorf("unknown API error: err = %v, want an error that may have placed", err)
 	}
 	if err := b.Cancel(ctx, "1"); err == nil {
 		t.Error("Cancel swallowed the API error")
@@ -154,8 +154,27 @@ func TestPlaceAndCancelErrors(t *testing.T) {
 	}
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := b.Place(cancelled, intent("c2", domain.OrderTypeLimit)); !errors.Is(err, context.Canceled) {
+	if _, err := b.Place(cancelled, intent("c2", domain.OrderTypeLimit)); !errors.Is(err, context.Canceled) || !errors.Is(err, orders.ErrNotPlaced) {
 		t.Errorf("cancelled ctx: err = %v", err)
+	}
+}
+
+func TestPlaceClassifiesKiteErrors(t *testing.T) {
+	cases := []struct {
+		err       error
+		notPlaced bool
+	}{
+		{kiteconnect.NewError(kiteconnect.InputError, "Invalid tradingsymbol", nil), true},
+		{kiteconnect.NewError(kiteconnect.NetworkError, "Request failed.", nil), false},
+		{kiteconnect.NewError(kiteconnect.GeneralError, "Something went wrong", nil), false},
+	}
+	for _, c := range cases {
+		b := newBroker(Config{}, &fakeAPI{err: c.err})
+		_, err := b.Place(context.Background(), intent("c1", domain.OrderTypeLimit))
+		b.Close()
+		if !errors.Is(err, c.err) || errors.Is(err, orders.ErrNotPlaced) != c.notPlaced {
+			t.Errorf("%v: err = %v, want ErrNotPlaced %v", c.err, err, c.notPlaced)
+		}
 	}
 }
 

@@ -21,6 +21,7 @@ var infy = domain.Instrument{Token: 408065, Exchange: "NSE", Symbol: "INFY"}
 func limitIntent(cycle string) domain.OrderIntent {
 	return domain.OrderIntent{
 		CycleID:    cycle,
+		ClientID:   orders.ClientID(cycle),
 		Instrument: infy,
 		Side:       domain.ActionBuy,
 		Quantity:   100,
@@ -116,7 +117,6 @@ func TestClientID(t *testing.T) {
 
 func TestValidateIntent(t *testing.T) {
 	valid := limitIntent("c1")
-	valid.ClientID = orders.ClientID("c1")
 	market := valid
 	market.Type, market.LimitPrice, market.MarketProtection = domain.OrderTypeMarket, 0, 2
 	if err := orders.ValidateIntent(valid); err != nil {
@@ -178,14 +178,16 @@ func TestSubmitZeroApproval(t *testing.T) {
 }
 
 func TestSubmitInvalidIntent(t *testing.T) {
-	m, b, j := newManager(t)
-	bad := limitIntent("c1")
-	bad.ClientID = "manual1"
-	if _, err := m.Submit(context.Background(), risk.ApprovalForTest(t, bad)); !errors.Is(err, orders.ErrInvalidIntent) {
-		t.Fatalf("err = %v, want ErrInvalidIntent", err)
-	}
-	if len(b.placed)+len(j.intents) != 0 {
-		t.Error("invalid intent was recorded or placed")
+	for name, clientID := range map[string]string{"foreign client id": "manual1", "missing client id": ""} {
+		m, b, j := newManager(t)
+		bad := limitIntent("c1")
+		bad.ClientID = clientID
+		if _, err := m.Submit(context.Background(), risk.ApprovalForTest(t, bad)); !errors.Is(err, orders.ErrInvalidIntent) {
+			t.Fatalf("%s: err = %v, want ErrInvalidIntent", name, err)
+		}
+		if len(b.placed)+len(j.intents) != 0 {
+			t.Errorf("%s: invalid intent was recorded or placed", name)
+		}
 	}
 }
 
@@ -248,6 +250,9 @@ func TestSubmitPlaceFailureIsNotRetried(t *testing.T) {
 	if err == nil || o.Status != orders.StatusPlaceFailed {
 		t.Fatalf("order %+v, err %v", o, err)
 	}
+	if open := m.Open(); len(open) != 1 {
+		t.Fatalf("Open() = %+v, want the order whose placement is unknown", open)
+	}
 	// The broker may have the order anyway, so it is never placed twice.
 	b.placeErr = nil
 	if _, err := m.Submit(ctx, a); !errors.Is(err, orders.ErrAlreadySubmitted) {
@@ -260,6 +265,30 @@ func TestSubmitPlaceFailureIsNotRetried(t *testing.T) {
 	got, _, err := m.Apply(domain.OrderUpdate{ClientID: o.Intent.ClientID, BrokerID: "K9", Status: domain.OrderStatusOpen})
 	if err != nil || got.Status != orders.StatusOpen || got.BrokerID != "K9" {
 		t.Fatalf("revived order %+v, err %v", got, err)
+	}
+}
+
+func TestSubmitDefiniteRejectionIsTerminal(t *testing.T) {
+	m, b, _ := newManager(t)
+	ctx := context.Background()
+	a := risk.ApprovalForTest(t, limitIntent("c1"))
+	b.placeErr = fmt.Errorf("%w: invalid tradingsymbol", orders.ErrNotPlaced)
+	o, err := m.Submit(ctx, a)
+	if !errors.Is(err, orders.ErrNotPlaced) || o.Status != orders.StatusRejected || o.Reason != b.placeErr.Error() {
+		t.Fatalf("order %+v, err %v", o, err)
+	}
+	if open := m.Open(); len(open) != 0 {
+		t.Errorf("Open() = %+v, want none", open)
+	}
+	if err := m.Cancel(ctx, o.Intent.ClientID); !errors.Is(err, orders.ErrOrderClosed) {
+		t.Errorf("cancel: err = %v, want ErrOrderClosed", err)
+	}
+	b.placeErr = nil
+	if _, err := m.Submit(ctx, a); !errors.Is(err, orders.ErrAlreadySubmitted) {
+		t.Fatalf("err = %v, want ErrAlreadySubmitted", err)
+	}
+	if len(b.placed) != 1 {
+		t.Fatalf("%d placements, want 1", len(b.placed))
 	}
 }
 
@@ -404,6 +433,46 @@ func TestReconcile(t *testing.T) {
 	}
 	if open := m.Open(); len(open) != 2 {
 		t.Errorf("Open() = %+v, want held and stray", open)
+	}
+}
+
+func TestReconcileRejectsMissingClientID(t *testing.T) {
+	j := &memJournal{}
+	m, _ := orders.NewManager(&fakeBroker{journal: j}, j)
+	recorded := limitIntent("c1")
+	recorded.ClientID = ""
+	if _, err := m.Reconcile(context.Background(), []domain.OrderIntent{recorded}); !errors.Is(err, orders.ErrInvalidIntent) {
+		t.Fatalf("err = %v, want ErrInvalidIntent", err)
+	}
+}
+
+func TestLateListedOrderLeavesNotPlaced(t *testing.T) {
+	j := &memJournal{}
+	b := &fakeBroker{journal: j}
+	m, _ := orders.NewManager(b, j)
+	ctx := context.Background()
+	r, err := m.Reconcile(ctx, []domain.OrderIntent{limitIntent("late")})
+	if err != nil || len(r.NotPlaced) != 1 {
+		t.Fatalf("reconcile %+v, err %v", r, err)
+	}
+	id := orders.ClientID("late")
+
+	got, _, err := m.Apply(domain.OrderUpdate{ClientID: id, BrokerID: "K7", Status: domain.OrderStatusOpen, FilledQuantity: 40, AveragePrice: 1500})
+	if err != nil || got.Status != orders.StatusOpen || got.BrokerID != "K7" || got.FilledQuantity != 40 {
+		t.Fatalf("order %+v, err %v", got, err)
+	}
+	if open := m.Open(); len(open) != 1 || open[0].Intent.ClientID != id {
+		t.Errorf("Open() = %+v, want the late order", open)
+	}
+	if err := m.Cancel(ctx, id); err != nil || len(b.canceled) != 1 || b.canceled[0] != "K7" {
+		t.Fatalf("cancel: err %v, canceled %v", err, b.canceled)
+	}
+	got, _, _ = m.Apply(domain.OrderUpdate{ClientID: id, BrokerID: "K7", Status: domain.OrderStatusFilled, FilledQuantity: 100, AveragePrice: 1500})
+	if got.Status != orders.StatusFilled || len(m.Open()) != 0 {
+		t.Errorf("order %+v, want FILLED and closed", got)
+	}
+	if len(b.placed) != 0 {
+		t.Errorf("placed %v, want nothing", b.placed)
 	}
 }
 

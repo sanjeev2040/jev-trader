@@ -120,15 +120,21 @@ func (b *Broker) Close() { b.updates.close() }
 // Updates returns the order-update stream.
 func (b *Broker) Updates() <-chan domain.OrderUpdate { return b.updates.out }
 
-// Place places a regular DAY order tagged with the intent's client id.
+// Place places a regular DAY order tagged with the intent's client id. An
+// error wraps orders.ErrNotPlaced when the request was never sent or Kite
+// rejected it as invalid input.
 func (b *Broker) Place(ctx context.Context, intent domain.OrderIntent) (string, error) {
 	if err := orders.ValidateIntent(intent); err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: %w", orders.ErrNotPlaced, err)
 	}
 	if err := b.waitOrder(ctx); err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: %w", orders.ErrNotPlaced, err)
 	}
 	resp, err := b.api.PlaceOrder(kiteconnect.VarietyRegular, b.params(intent))
+	var apiErr kiteconnect.Error
+	if errors.As(err, &apiErr) && apiErr.ErrorType == kiteconnect.InputError {
+		return "", fmt.Errorf("%w: kite: place %s: %w", orders.ErrNotPlaced, intent.ClientID, err)
+	}
 	if err != nil {
 		return "", fmt.Errorf("kite: place %s: %w", intent.ClientID, err)
 	}
