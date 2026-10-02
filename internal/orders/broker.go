@@ -5,15 +5,12 @@
 // The manager is owned by the engine loop and is not safe for concurrent use.
 // Brokers live in orders/paper (simulated fills, the default) and orders/kite
 // (real orders, gated off until live trading is explicitly approved).
-// Order modification (Kite's 25-modification cap with cancel-and-replace) is
-// deferred to issue #17.
 package orders
 
 import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 
 	"github.com/sanjeev2040/jev-trader/internal/domain"
 )
@@ -24,12 +21,6 @@ type Broker interface {
 	Cancel(ctx context.Context, brokerID string) error
 	Updates() <-chan domain.OrderUpdate // acks, rejections, partial and full fills
 }
-
-// ErrNotPlaced is wrapped by Place errors that guarantee the broker created no
-// order: the intent was refused before it was sent, or the broker rejected the
-// request itself. Any other Place error leaves it unknown whether the order
-// exists.
-var ErrNotPlaced = errors.New("orders: order not placed")
 
 // OrderBook is implemented by brokers that can list the trading day's orders.
 // The manager needs it to reconcile recorded intents on restart.

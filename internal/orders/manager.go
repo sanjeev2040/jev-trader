@@ -15,23 +15,20 @@ import (
 // Status is the manager's view of an order.
 type Status string
 
-// Order statuses. Filled, Cancelled, Rejected and NotPlaced are terminal, but
-// a broker update for a NotPlaced order still moves it to the reported status.
+// Order statuses. Filled, Cancelled, Rejected and NotPlaced are terminal.
 const (
 	// StatusPending: the intent is recorded and placed, and the broker has not
 	// acknowledged it yet.
 	StatusPending Status = "PENDING"
-	// StatusPlaceFailed: Place returned an error other than ErrNotPlaced. The
-	// broker may still hold the order (a timeout, say), so a later update or
-	// Reconcile can revive it.
+	// StatusPlaceFailed: Place returned an error. The broker may still hold
+	// the order (a timeout, say), so a later update or Reconcile can revive it.
 	StatusPlaceFailed Status = "PLACE_FAILED"
 	StatusOpen        Status = "OPEN"
 	StatusFilled      Status = "FILLED"
 	StatusCancelled   Status = "CANCELLED"
 	StatusRejected    Status = "REJECTED"
-	// StatusNotPlaced: Reconcile found a recorded intent the broker did not
-	// list. It is not placed again; its decision is stale. If the broker
-	// lists it late, its updates still apply.
+	// StatusNotPlaced: Reconcile found a recorded intent the broker never
+	// received. It is not placed again; its decision is stale.
 	StatusNotPlaced Status = "NOT_PLACED"
 )
 
@@ -48,8 +45,6 @@ func (s Status) Terminal() bool {
 // backwards.
 func (s Status) rank() int {
 	switch {
-	case s == StatusNotPlaced:
-		return 0
 	case s.Terminal():
 		return 2
 	case s == StatusOpen:
@@ -132,9 +127,8 @@ func NewManager(broker Broker, journal Journal) (*Manager, error) {
 // its existing order with ErrAlreadySubmitted.
 //
 // The intent is recorded in the journal before it is placed. If recording
-// fails, nothing is placed. If Place fails, the error is returned and the
-// order is kept as StatusRejected when the error wraps ErrNotPlaced, else as
-// StatusPlaceFailed.
+// fails, nothing is placed. If Place fails, the order is kept as
+// StatusPlaceFailed and the error is returned.
 func (m *Manager) Submit(ctx context.Context, a risk.Approval) (Order, error) {
 	if !m.reconciled {
 		return Order{}, ErrNotReconciled
@@ -143,6 +137,9 @@ func (m *Manager) Submit(ctx context.Context, a risk.Approval) (Order, error) {
 		return Order{}, ErrZeroApproval
 	}
 	intent := a.Intent()
+	if intent.ClientID == "" && intent.CycleID != "" {
+		intent.ClientID = ClientID(intent.CycleID)
+	}
 	if err := ValidateIntent(intent); err != nil {
 		return Order{}, err
 	}
@@ -157,9 +154,6 @@ func (m *Manager) Submit(ctx context.Context, a risk.Approval) (Order, error) {
 	brokerID, err := m.broker.Place(ctx, intent)
 	if err != nil {
 		o.Status = StatusPlaceFailed
-		if errors.Is(err, ErrNotPlaced) {
-			o.Status = StatusRejected
-		}
 		o.Reason = err.Error()
 		return *o, fmt.Errorf("orders: place %s: %w", intent.ClientID, err)
 	}
@@ -209,7 +203,7 @@ func (m *Manager) Apply(u domain.OrderUpdate) (Order, *domain.Fill, error) {
 		o.AveragePrice = u.AveragePrice
 		o.Costs = max(u.Costs, o.Costs)
 	}
-	if s, ok := statusOf(u.Status); ok && (o.Status == StatusNotPlaced || !o.Status.Terminal()) && s.rank() >= o.Status.rank() {
+	if s, ok := statusOf(u.Status); ok && !o.Status.Terminal() && s.rank() >= o.Status.rank() {
 		o.Status = s
 		if u.Reason != "" {
 			o.Reason = u.Reason
@@ -265,7 +259,7 @@ type Reconciliation struct {
 	// Adopted are recorded intents the broker holds, now tracked with the
 	// broker's latest state.
 	Adopted []Order
-	// NotPlaced are recorded intents the broker did not list. They are
+	// NotPlaced are recorded intents the broker never received. They are
 	// marked StatusNotPlaced and not placed again.
 	NotPlaced []Order
 	// Unrecorded are broker orders carrying this system's tag prefix that no
@@ -295,6 +289,9 @@ func (m *Manager) Reconcile(ctx context.Context, intents []domain.OrderIntent) (
 	var r Reconciliation
 	recorded := make(map[string]bool, len(intents))
 	for _, intent := range intents {
+		if intent.ClientID == "" {
+			intent.ClientID = ClientID(intent.CycleID)
+		}
 		if intent.ClientID != ClientID(intent.CycleID) {
 			return r, fmt.Errorf("%w: recorded client id %q is not derived from cycle id %q", ErrInvalidIntent, intent.ClientID, intent.CycleID)
 		}
