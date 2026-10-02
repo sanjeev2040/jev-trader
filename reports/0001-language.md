@@ -36,7 +36,7 @@ Hybrids (for example, Rust ingest feeding a Python decision process) were not co
 
 ## Criteria matrix
 
-Scores run from 1 (poor) to 5 (strong). Weights reflect the captain's three priorities: ease of use maps to dev ease and testing, speed to runtime, and cost to hosting and maintenance. They also reflect that this system moves real money. The weights are a judgment call; the owner should re-weight if priorities differ.
+Scores run from 1 (poor) to 5 (strong). Weights reflect the owner's three priorities: ease of use maps to dev ease and testing, speed to runtime, and cost to hosting and maintenance. They also reflect that this system moves real money. The weights are a judgment call; the owner should re-weight if priorities differ.
 
 | Criterion | Weight | Go | Rust | Python |
 | --- | ---: | :-: | :-: | :-: |

@@ -2,6 +2,6 @@
 
 Decision records for jev-trader. Each report is numbered and records its own status (Proposed, Accepted, Superseded).
 
-| # | Title | Status |
-| --- | --- | --- |
-| [0001](0001-language.md) | Implementation language | Proposed |
+| # | Title |
+| --- | --- |
+| [0001](0001-language.md) | Implementation language |
