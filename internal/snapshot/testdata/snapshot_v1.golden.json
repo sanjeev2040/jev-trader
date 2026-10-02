@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "instrument": "I01",
+  "session": {
+    "minutes_since_open": 40
+  },
+  "features": {
+    "returns_pct": {
+      "bars_1": 0.1286,
+      "bars_5": 0.1484,
+      "bars_15": 0.4467,
+      "bars_30": 0.8973
+    },
+    "session_return_pct": 1.2,
+    "bar_range_pct": 0.2273,
+    "session_range_pos": 0.966,
+    "volume_rel": 1.2727,
+    "vwap_dist_pct": 0.6847
+  },
+  "index": {
+    "available": true,
+    "returns_pct": {
+      "bars_1": 0.1286,
+      "bars_5": 0.1484,
+      "bars_15": 0.4467,
+      "bars_30": 0.8973
+    },
+    "session_return_pct": 1.2
+  },
+  "position": {
+    "side": "LONG",
+    "size_bucket": "S",
+    "unrealized_pnl_pct": 1.7085
+  }
+}
