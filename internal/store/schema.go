@@ -5,7 +5,8 @@
 //	<root>/<kind>/date=YYYY-MM-DD/<kind>-HHMM-NNN.parquet
 //
 // The date and HHMM are the IST date and the start of the 15-minute window the
-// rows fall in. NNN distinguishes files of one window written by different
+// rows fall in: a tick by its receive time, so files hold ticks in the order
+// they arrived, and a bar by its end. NNN distinguishes files of one window written by different
 // runs. A file is written under a hidden temporary name and renamed when it is
 // closed, so readers never see a partial file and a crash loses at most the
 // file that was open.
@@ -62,17 +63,19 @@ type tickRow struct {
 }
 
 // barRow is the Parquet schema of a bar (BarSchemaVersion). The bar covers
-// [start, start + interval_seconds).
+// [start, end).
 type barRow struct {
 	InstrumentToken uint32  `parquet:"instrument_token"`
+	Exchange        string  `parquet:"exchange"`
+	Symbol          string  `parquet:"symbol"`
 	IntervalSeconds int32   `parquet:"interval_seconds"`
 	Start           int64   `parquet:"start,timestamp(nanosecond)"`
+	End             int64   `parquet:"end,timestamp(nanosecond)"`
 	Open            float64 `parquet:"open"`
 	High            float64 `parquet:"high"`
 	Low             float64 `parquet:"low"`
 	Close           float64 `parquet:"close"`
-	Volume          uint64  `parquet:"volume"`
-	Ticks           uint32  `parquet:"ticks"`
+	Volume          int64   `parquet:"volume"`
 }
 
 func toNanos(t time.Time) int64 {
@@ -123,33 +126,39 @@ func rowToTick(r tickRow) domain.Tick {
 
 func barToRow(b domain.Bar) barRow {
 	return barRow{
-		InstrumentToken: b.InstrumentToken,
+		InstrumentToken: b.Instrument.Token,
+		Exchange:        b.Instrument.Exchange,
+		Symbol:          b.Instrument.Symbol,
 		IntervalSeconds: int32(b.Interval / time.Second),
 		Start:           toNanos(b.Start),
+		End:             toNanos(b.End),
 		Open:            b.Open,
 		High:            b.High,
 		Low:             b.Low,
 		Close:           b.Close,
 		Volume:          b.Volume,
-		Ticks:           b.Ticks,
 	}
 }
 
 func rowToBar(r barRow) domain.Bar {
 	return domain.Bar{
-		InstrumentToken: r.InstrumentToken,
-		Interval:        time.Duration(r.IntervalSeconds) * time.Second,
-		Start:           fromNanos(r.Start),
-		Open:            r.Open,
-		High:            r.High,
-		Low:             r.Low,
-		Close:           r.Close,
-		Volume:          r.Volume,
-		Ticks:           r.Ticks,
+		Instrument: domain.Instrument{
+			Token:    r.InstrumentToken,
+			Exchange: r.Exchange,
+			Symbol:   r.Symbol,
+		},
+		Interval: time.Duration(r.IntervalSeconds) * time.Second,
+		Start:    fromNanos(r.Start),
+		End:      fromNanos(r.End),
+		Open:     r.Open,
+		High:     r.High,
+		Low:      r.Low,
+		Close:    r.Close,
+		Volume:   r.Volume,
 	}
 }
 
 // barTime is the instant a bar is partitioned by: the last instant it covers,
 // so a bar is filed with the window and date in which it closes and files are
 // ordered by bar end.
-func barTime(b domain.Bar) time.Time { return b.Start.Add(b.Interval - 1) }
+func barTime(b domain.Bar) time.Time { return b.End.Add(-1) }

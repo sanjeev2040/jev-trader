@@ -20,8 +20,8 @@ func tick(token uint32, ts time.Time, price float64, cumVol uint64) domain.Tick 
 	return domain.Tick{InstrumentToken: token, ExchangeTime: ts, LastPrice: price, VolumeTraded: cumVol}
 }
 
-func bar(token uint32, interval time.Duration, start time.Time, o, h, l, c float64, vol uint64, ticks uint32) domain.Bar {
-	return domain.Bar{InstrumentToken: token, Interval: interval, Start: start, Open: o, High: h, Low: l, Close: c, Volume: vol, Ticks: ticks}
+func bar(token uint32, interval time.Duration, start time.Time, o, h, l, c float64, vol int64) domain.Bar {
+	return domain.Bar{Instrument: domain.Instrument{Token: token}, Interval: interval, Start: start, End: start.Add(interval), Open: o, High: h, Low: l, Close: c, Volume: vol}
 }
 
 func newBuilder(t *testing.T, cfg Config) *Builder {
@@ -51,8 +51,11 @@ func assertBars(t *testing.T, got, want []domain.Bar) {
 		if !got[i].Start.Equal(want[i].Start) {
 			t.Errorf("bar %d start = %v, want %v", i, got[i].Start, want[i].Start)
 		}
+		if !got[i].End.Equal(want[i].End) {
+			t.Errorf("bar %d end = %v, want %v", i, got[i].End, want[i].End)
+		}
 		g, w := got[i], want[i]
-		g.Start, w.Start = time.Time{}, time.Time{}
+		g.Start, w.Start, g.End, w.End = time.Time{}, time.Time{}, time.Time{}, time.Time{}
 		if g != w {
 			t.Errorf("bar %d:\ngot  %+v\nwant %+v", i, got[i], want[i])
 		}
@@ -73,10 +76,10 @@ func TestOneMinuteBarClosesOnNextMinuteTick(t *testing.T) {
 		t.Fatalf("bar closed early: %+v", got)
 	}
 	got = b.Add(tick(1, at(9, 16, 0), 103, 1110))
-	assertBars(t, got, []domain.Bar{bar(1, m1, at(9, 15, 0), 100, 102, 99, 101, 100, 4)})
+	assertBars(t, got, []domain.Bar{bar(1, m1, at(9, 15, 0), 100, 102, 99, 101, 100)})
 
 	got = b.Advance(at(9, 30, 0))
-	assertBars(t, got, []domain.Bar{bar(1, m1, at(9, 16, 0), 103, 103, 103, 103, 10, 1)})
+	assertBars(t, got, []domain.Bar{bar(1, m1, at(9, 16, 0), 103, 103, 103, 103, 10)})
 }
 
 func TestFiveMinuteBarClosesWithItsLastMinute(t *testing.T) {
@@ -96,16 +99,16 @@ func TestFiveMinuteBarClosesWithItsLastMinute(t *testing.T) {
 	got := feed(b, ticks...)
 	// Four 1m bars close on the following minute's first tick.
 	assertBars(t, got, []domain.Bar{
-		bar(7, m1, at(9, 15, 0), 100, 100.5, 100, 100.5, 10, 2),
-		bar(7, m1, at(9, 16, 0), 101, 101.5, 101, 101.5, 20, 2),
-		bar(7, m1, at(9, 17, 0), 102, 102.5, 102, 102.5, 20, 2),
-		bar(7, m1, at(9, 18, 0), 103, 103.5, 103, 103.5, 20, 2),
+		bar(7, m1, at(9, 15, 0), 100, 100.5, 100, 100.5, 10),
+		bar(7, m1, at(9, 16, 0), 101, 101.5, 101, 101.5, 20),
+		bar(7, m1, at(9, 17, 0), 102, 102.5, 102, 102.5, 20),
+		bar(7, m1, at(9, 18, 0), 103, 103.5, 103, 103.5, 20),
 	})
 	// The 09:19 bar's close completes the 09:15 5m bar in the same call.
 	got = b.Add(tick(7, at(9, 20, 1), 105, vol+5))
 	assertBars(t, got, []domain.Bar{
-		bar(7, m1, at(9, 19, 0), 104, 104.5, 104, 104.5, 20, 2),
-		bar(7, m5, at(9, 15, 0), 100, 104.5, 100, 104.5, 90, 10),
+		bar(7, m1, at(9, 19, 0), 104, 104.5, 104, 104.5, 20),
+		bar(7, m5, at(9, 15, 0), 100, 104.5, 100, 104.5, 90),
 	})
 }
 
@@ -118,7 +121,7 @@ func TestAdvanceWaitsForGrace(t *testing.T) {
 	// A tick stamped before the boundary that arrives inside the grace still counts.
 	b.Add(tick(1, at(9, 15, 59), 98, 0))
 	got := b.Advance(at(9, 16, 2))
-	assertBars(t, got, []domain.Bar{bar(1, m1, at(9, 15, 0), 100, 100, 98, 98, 0, 2)})
+	assertBars(t, got, []domain.Bar{bar(1, m1, at(9, 15, 0), 100, 100, 98, 98, 0)})
 }
 
 func TestAdvanceClosesIlliquidDerivedBar(t *testing.T) {
@@ -126,12 +129,12 @@ func TestAdvanceClosesIlliquidDerivedBar(t *testing.T) {
 	b.Add(tick(3, at(9, 16, 20), 50, 100))
 	b.Add(tick(3, at(9, 16, 40), 51, 160))
 	got := b.Advance(at(9, 17, 2))
-	assertBars(t, got, []domain.Bar{bar(3, m1, at(9, 16, 0), 50, 51, 50, 51, 60, 2)})
+	assertBars(t, got, []domain.Bar{bar(3, m1, at(9, 16, 0), 50, 51, 50, 51, 60)})
 	if got := b.Advance(at(9, 20, 1)); len(got) != 0 {
 		t.Fatalf("5m bar closed inside grace: %+v", got)
 	}
 	got = b.Advance(at(9, 20, 2))
-	assertBars(t, got, []domain.Bar{bar(3, m5, at(9, 15, 0), 50, 51, 50, 51, 60, 2)})
+	assertBars(t, got, []domain.Bar{bar(3, m5, at(9, 15, 0), 50, 51, 50, 51, 60)})
 }
 
 func TestLateTicksAreDroppedButVolumeIsKept(t *testing.T) {
@@ -147,7 +150,7 @@ func TestLateTicksAreDroppedButVolumeIsKept(t *testing.T) {
 	}
 	got := b.Advance(at(9, 18, 0))
 	// The late tick's price is ignored; its volume shows up in the next accepted delta.
-	assertBars(t, got, []domain.Bar{bar(1, m1, at(9, 16, 0), 101, 102, 101, 102, 200, 2)})
+	assertBars(t, got, []domain.Bar{bar(1, m1, at(9, 16, 0), 101, 102, 101, 102, 200)})
 }
 
 func TestLateTickCannotReopenBarClosedByAdvance(t *testing.T) {
@@ -155,8 +158,8 @@ func TestLateTickCannotReopenBarClosedByAdvance(t *testing.T) {
 	b.Add(tick(1, at(9, 17, 10), 100, 0))
 	first := b.Advance(at(9, 20, 5)) // closes 09:17 1m and the 09:15 5m bar
 	assertBars(t, first, []domain.Bar{
-		bar(1, m1, at(9, 17, 0), 100, 100, 100, 100, 0, 1),
-		bar(1, m5, at(9, 15, 0), 100, 100, 100, 100, 0, 1),
+		bar(1, m1, at(9, 17, 0), 100, 100, 100, 100, 0),
+		bar(1, m5, at(9, 15, 0), 100, 100, 100, 100, 0),
 	})
 	// 09:19 belongs to the already-closed 5m window; it must not create a second one.
 	if got := b.Add(tick(1, at(9, 19, 50), 99, 10)); len(got) != 0 {
@@ -184,7 +187,7 @@ func TestVolume(t *testing.T) {
 	cases := []struct {
 		name  string
 		ticks []domain.Tick
-		want  uint64
+		want  int64
 	}{
 		{"first tick is baseline", []domain.Tick{tick(1, at(9, 15, 1), 10, 5000)}, 0},
 		{"deltas of cumulative volume", []domain.Tick{
@@ -196,6 +199,9 @@ func TestVolume(t *testing.T) {
 		{"reset on a new day counts the whole value", []domain.Tick{
 			tick(1, prev.Add(6*time.Hour), 10, 900000), tick(1, at(9, 15, 1), 10, 1200),
 		}, 1200},
+		{"higher value on a new day counts the whole value", []domain.Tick{
+			tick(1, prev.Add(6*time.Hour), 10, 400000), tick(1, at(9, 15, 1), 10, 450000),
+		}, 450000},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -233,8 +239,8 @@ func TestGapClosesDerivedBarOnLaterTick(t *testing.T) {
 	)
 	// No bars are invented for the empty minutes.
 	assertBars(t, got, []domain.Bar{
-		bar(1, m1, at(9, 16, 0), 100, 100, 100, 100, 0, 1),
-		bar(1, m5, at(9, 15, 0), 100, 100, 100, 100, 0, 1),
+		bar(1, m1, at(9, 16, 0), 100, 100, 100, 100, 0),
+		bar(1, m5, at(9, 15, 0), 100, 100, 100, 100, 0),
 	})
 }
 
@@ -247,7 +253,7 @@ func TestOutputOrderIsDeterministic(t *testing.T) {
 		got := b.Advance(at(9, 21, 0))
 		var keys []string
 		for _, x := range got {
-			keys = append(keys, fmt.Sprintf("%v/%d", x.Interval, x.InstrumentToken))
+			keys = append(keys, fmt.Sprintf("%v/%d", x.Interval, x.Instrument.Token))
 		}
 		want := []string{"1m0s/10", "1m0s/20", "1m0s/30", "5m0s/10", "5m0s/20", "5m0s/30"}
 		if !slices.Equal(keys, want) {
@@ -283,8 +289,8 @@ func TestAggregateMatchesBuilder(t *testing.T) {
 }
 
 func TestAggregateErrors(t *testing.T) {
-	one := bar(1, m1, at(9, 15, 0), 1, 1, 1, 1, 0, 0)
-	five := bar(1, m5, at(9, 15, 0), 1, 1, 1, 1, 0, 0)
+	one := bar(1, m1, at(9, 15, 0), 1, 1, 1, 1, 0)
+	five := bar(1, m5, at(9, 15, 0), 1, 1, 1, 1, 0)
 	if _, err := Aggregate([]domain.Bar{one, five}, 15*time.Minute); err == nil {
 		t.Error("mixed intervals accepted")
 	}

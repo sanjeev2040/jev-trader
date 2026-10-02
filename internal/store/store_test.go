@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sanjeev2040/jev-trader/internal/bars"
 	"github.com/sanjeev2040/jev-trader/internal/domain"
 )
 
@@ -15,8 +16,9 @@ func at(h, m, s int) time.Time { return time.Date(2026, 10, 1, h, m, s, 0, ist) 
 
 func fixtureBar(token uint32, interval time.Duration, start time.Time, price float64) domain.Bar {
 	return domain.Bar{
-		InstrumentToken: token, Interval: interval, Start: start,
-		Open: price, High: price + 1, Low: price - 1, Close: price + 0.5, Volume: 1234, Ticks: 7,
+		Instrument: domain.Instrument{Token: token, Exchange: "NSE", Symbol: "INFY"},
+		Interval:   interval, Start: start, End: start.Add(interval),
+		Open: price, High: price + 1, Low: price - 1, Close: price + 0.5, Volume: 1234,
 	}
 }
 
@@ -30,7 +32,10 @@ func equalBars(t *testing.T, got, want []domain.Bar) {
 		if !g.Start.Equal(w.Start) {
 			t.Errorf("bar %d start = %v, want %v", i, g.Start, w.Start)
 		}
-		g.Start, w.Start = time.Time{}, time.Time{}
+		if !g.End.Equal(w.End) {
+			t.Errorf("bar %d end = %v, want %v", i, g.End, w.End)
+		}
+		g.Start, w.Start, g.End, w.End = time.Time{}, time.Time{}, time.Time{}, time.Time{}
 		if g != w {
 			t.Errorf("bar %d:\ngot  %+v\nwant %+v", i, got[i], want[i])
 		}
@@ -256,7 +261,7 @@ func writeTicks(t *testing.T, root string, ticks ...domain.Tick) {
 	t.Helper()
 	w := &writer[tickRow]{root: root, kind: KindTicks, schema: TickSchemaVersion}
 	for _, tk := range ticks {
-		if err := w.write(tk.ExchangeTime, tickToRow(tk)); err != nil {
+		if err := w.write(tk.ReceiveTime, tickToRow(tk)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -269,13 +274,14 @@ func TestScanTicks(t *testing.T) {
 	root := t.TempDir()
 	full := domain.Tick{
 		InstrumentToken: 408065, ExchangeTime: at(9, 15, 1), LastTradeTime: at(9, 15, 0),
-		ReceiveTime: at(9, 15, 1).Add(1234567), LastPrice: 1520.35, LastQuantity: 10,
+		ReceiveTime: at(9, 15, 2).Add(1234567), LastPrice: 1520.35, LastQuantity: 10,
 		AveragePrice: 1519.8, VolumeTraded: 125000, TotalBuyQty: 4000, TotalSellQty: 3500, OI: 0,
 	}
-	first := domain.Tick{InstrumentToken: 1, ExchangeTime: at(9, 15, 2), LastPrice: 1}
-	second := domain.Tick{InstrumentToken: 2, ExchangeTime: at(9, 15, 2), LastPrice: 2}
-	next := domain.Tick{InstrumentToken: 1, ExchangeTime: at(9, 30, 0), LastPrice: 3}
-	// Recorded slightly out of exchange-time order, as a live feed can be.
+	first := domain.Tick{InstrumentToken: 1, ExchangeTime: at(9, 15, 2), ReceiveTime: at(9, 15, 2), LastPrice: 1}
+	second := domain.Tick{InstrumentToken: 2, ExchangeTime: at(9, 15, 2), ReceiveTime: at(9, 15, 2), LastPrice: 2}
+	next := domain.Tick{InstrumentToken: 1, ExchangeTime: at(9, 30, 0), ReceiveTime: at(9, 30, 0), LastPrice: 3}
+	// Recorded slightly out of exchange-time order, as a live feed can be, and
+	// read back in recorded order.
 	writeTicks(t, root, first, second, full, next)
 
 	var got []domain.Tick
@@ -286,7 +292,7 @@ func TestScanTicks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []domain.Tick{full, first, second, next}
+	want := []domain.Tick{first, second, full, next}
 	if len(got) != len(want) {
 		t.Fatalf("got %d ticks, want %d", len(got), len(want))
 	}
@@ -301,8 +307,8 @@ func TestScanTicks(t *testing.T) {
 			t.Errorf("tick %d = %+v, want %+v", i, got[i], want[i])
 		}
 	}
-	if !got[1].LastTradeTime.IsZero() {
-		t.Errorf("unknown last trade time read back as %v", got[1].LastTradeTime)
+	if !got[0].LastTradeTime.IsZero() {
+		t.Errorf("unknown last trade time read back as %v", got[0].LastTradeTime)
 	}
 
 	got = nil
@@ -320,4 +326,49 @@ func TestScanTicks(t *testing.T) {
 	if !errors.Is(err, stop) || calls != 1 {
 		t.Fatalf("callback error not propagated: %v after %d calls", err, calls)
 	}
+}
+
+func TestReplayedTicksBuildTheBarsLiveBuilt(t *testing.T) {
+	recv := func(ts time.Time) time.Time { return ts.Add(100 * time.Millisecond) }
+	// The 09:29:59 tick arrives after the 09:30:00 one, so it crosses into the
+	// next file window and is late for the live Builder.
+	arrived := []domain.Tick{
+		{InstrumentToken: 1, ExchangeTime: at(9, 29, 0), ReceiveTime: recv(at(9, 29, 0)), LastPrice: 100, VolumeTraded: 1000},
+		{InstrumentToken: 1, ExchangeTime: at(9, 30, 0), ReceiveTime: recv(at(9, 30, 0)), LastPrice: 101, VolumeTraded: 1100},
+		{InstrumentToken: 1, ExchangeTime: at(9, 29, 59), ReceiveTime: recv(at(9, 30, 0)).Add(time.Millisecond), LastPrice: 90, VolumeTraded: 1150},
+		{InstrumentToken: 1, ExchangeTime: at(9, 30, 30), ReceiveTime: recv(at(9, 30, 30)), LastPrice: 102, VolumeTraded: 1200},
+	}
+	build := func(ticks func(func(domain.Tick) error) error) ([]domain.Bar, bars.Stats) {
+		t.Helper()
+		b, err := bars.New(bars.Config{Derived: []time.Duration{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []domain.Bar
+		if err := ticks(func(tk domain.Tick) error { out = append(out, b.Add(tk)...); return nil }); err != nil {
+			t.Fatal(err)
+		}
+		return append(out, b.Advance(at(10, 0, 0))...), b.Stats()
+	}
+
+	live, liveStats := build(func(fn func(domain.Tick) error) error {
+		for _, tk := range arrived {
+			if err := fn(tk); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	root := t.TempDir()
+	writeTicks(t, root, arrived...)
+	replayed, replayStats := build(func(fn func(domain.Tick) error) error { return ScanTicks(root, Query{}, fn) })
+
+	if liveStats.Late != 1 || replayStats != liveStats {
+		t.Fatalf("stats live %+v, replay %+v; want one late tick in both", liveStats, replayStats)
+	}
+	equalBars(t, live, []domain.Bar{
+		{Instrument: domain.Instrument{Token: 1}, Interval: time.Minute, Start: at(9, 29, 0), End: at(9, 30, 0), Open: 100, High: 100, Low: 100, Close: 100},
+		{Instrument: domain.Instrument{Token: 1}, Interval: time.Minute, Start: at(9, 30, 0), End: at(9, 31, 0), Open: 101, High: 102, Low: 101, Close: 102, Volume: 200},
+	})
+	equalBars(t, replayed, live)
 }

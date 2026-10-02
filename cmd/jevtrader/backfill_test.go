@@ -95,11 +95,14 @@ func TestBackfillCommand(t *testing.T) {
 		t.Fatalf("got %d 5m bars, want 4: %+v", len(got), got)
 	}
 	first := got[0]
-	wantBar := domain.Bar{InstrumentToken: 408065, Interval: 5 * time.Minute, Open: 65, High: 71, Low: 64, Close: 70, Volume: 1500}
+	wantBar := domain.Bar{Instrument: domain.Instrument{Token: 408065}, Interval: 5 * time.Minute, Open: 65, High: 71, Low: 64, Close: 70, Volume: 1500}
 	if !first.Start.Equal(time.Date(2026, 9, 1, 9, 15, 0, 0, ist)) {
 		t.Errorf("first 5m start = %v", first.Start)
 	}
-	first.Start = time.Time{}
+	if !first.End.Equal(first.Start.Add(5 * time.Minute)) {
+		t.Errorf("first 5m end = %v, want start+5m", first.End)
+	}
+	first.Start, first.End = time.Time{}, time.Time{}
 	if first != wantBar {
 		t.Errorf("first 5m bar = %+v, want %+v", first, wantBar)
 	}
@@ -192,6 +195,9 @@ func TestParseBackfill(t *testing.T) {
 		{"1", "2026-09-01", "", "90s"},
 		{"1", "2026-09-01", "", "1m"},
 		{"1", "2026-09-01", "", "x"},
+		{"1", "2026-09-01", "", "7m"},
+		{"1", "2026-09-01", "", "45m"},
+		{"1", "2026-09-01", "", "5m,5m"},
 	}
 	for _, tc := range bad {
 		if _, err := parseBackfill(tc.tokens, tc.from, tc.to, tc.derive, "data"); err == nil {

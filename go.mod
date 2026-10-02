@@ -1,6 +1,6 @@
 module github.com/sanjeev2040/jev-trader
 
-go 1.23
+go 1.26.0
 
 require (
 	github.com/parquet-go/parquet-go v0.32.0
