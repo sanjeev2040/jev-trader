@@ -1,11 +1,12 @@
 module github.com/sanjeev2040/jev-trader
 
-go 1.27.1
+go 1.24.9
 
 require (
+	github.com/gorilla/websocket v1.4.2
 	github.com/parquet-go/parquet-go v0.32.0
 	github.com/zerodha/gokiteconnect/v4 v4.4.3
-	golang.org/x/time v0.16.0
+	golang.org/x/time v0.8.0
 )
 
 require (

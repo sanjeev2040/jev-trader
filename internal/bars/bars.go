@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/sanjeev2040/jev-trader/internal/domain"
@@ -59,7 +60,7 @@ type instrument struct {
 	closedThrough time.Time     // bars ending at or before this are final
 
 	haveVolume bool
-	volume     uint64 // last accepted cumulative day volume
+	volume     int64  // last accepted cumulative day volume
 	volumeDay  string // IST date of that observation
 }
 
@@ -137,12 +138,13 @@ func (b *Builder) Add(t domain.Tick) []domain.Bar {
 
 	if st.base == nil {
 		st.base = &domain.Bar{
-			InstrumentToken: t.InstrumentToken,
-			Interval:        b.base,
-			Start:           start,
-			Open:            t.LastPrice,
-			High:            t.LastPrice,
-			Low:             t.LastPrice,
+			Instrument: instrumentOf(t),
+			Interval:   b.base,
+			Start:      start,
+			End:        start.Add(b.base),
+			Open:       t.LastPrice,
+			High:       t.LastPrice,
+			Low:        t.LastPrice,
 		}
 	}
 	bar := st.base
@@ -150,7 +152,6 @@ func (b *Builder) Add(t domain.Tick) []domain.Bar {
 	bar.Low = min(bar.Low, t.LastPrice)
 	bar.Close = t.LastPrice
 	bar.Volume += st.volumeDelta(t)
-	bar.Ticks++
 
 	Sort(out)
 	return out
@@ -201,12 +202,13 @@ func (b *Builder) feedDerived(st *instrument, bar domain.Bar, out *[]domain.Bar)
 		}
 		if st.derived[i] == nil {
 			st.derived[i] = &domain.Bar{
-				InstrumentToken: bar.InstrumentToken,
-				Interval:        interval,
-				Start:           start,
-				Open:            bar.Open,
-				High:            bar.High,
-				Low:             bar.Low,
+				Instrument: bar.Instrument,
+				Interval:   interval,
+				Start:      start,
+				End:        start.Add(interval),
+				Open:       bar.Open,
+				High:       bar.High,
+				Low:        bar.Low,
 			}
 		}
 		merge(st.derived[i], bar)
@@ -223,19 +225,19 @@ func (b *Builder) feedDerived(st *instrument, bar domain.Bar, out *[]domain.Bar)
 // The first observation of an instrument only sets the baseline. A lower
 // observation on a later IST date is a new day, so the whole value counts; a
 // lower value on the same date is stale data and counts nothing.
-func (st *instrument) volumeDelta(t domain.Tick) uint64 {
+func (st *instrument) volumeDelta(t domain.Tick) int64 {
 	day := t.ExchangeTime.In(ist).Format(time.DateOnly)
-	var delta uint64
+	var delta int64
 	switch {
 	case !st.haveVolume:
 	case day > st.volumeDay:
-		delta = t.VolumeTraded
-	case t.VolumeTraded >= st.volume:
-		delta = t.VolumeTraded - st.volume
+		delta = t.Volume
+	case t.Volume >= st.volume:
+		delta = t.Volume - st.volume
 	default:
 		return 0 // stale; keep the higher baseline
 	}
-	st.haveVolume, st.volume, st.volumeDay = true, t.VolumeTraded, day
+	st.haveVolume, st.volume, st.volumeDay = true, t.Volume, day
 	return delta
 }
 
@@ -262,25 +264,26 @@ func Aggregate(in []domain.Bar, interval time.Duration) ([]domain.Bar, error) {
 	}
 	sorted := slices.Clone(in)
 	slices.SortFunc(sorted, func(a, b domain.Bar) int {
-		if a.InstrumentToken != b.InstrumentToken {
-			return cmp.Compare(a.InstrumentToken, b.InstrumentToken)
+		if a.Instrument.Token != b.Instrument.Token {
+			return cmp.Compare(a.Instrument.Token, b.Instrument.Token)
 		}
 		return a.Start.Compare(b.Start)
 	})
 	var out []domain.Bar
 	for _, bar := range sorted {
 		start := bar.Start.Truncate(interval)
-		if n := len(out); n > 0 && out[n-1].InstrumentToken == bar.InstrumentToken && out[n-1].Start.Equal(start) {
+		if n := len(out); n > 0 && out[n-1].Instrument.Token == bar.Instrument.Token && out[n-1].Start.Equal(start) {
 			merge(&out[n-1], bar)
 			continue
 		}
 		agg := domain.Bar{
-			InstrumentToken: bar.InstrumentToken,
-			Interval:        interval,
-			Start:           start,
-			Open:            bar.Open,
-			High:            bar.High,
-			Low:             bar.Low,
+			Instrument: bar.Instrument,
+			Interval:   interval,
+			Start:      start,
+			End:        start.Add(interval),
+			Open:       bar.Open,
+			High:       bar.High,
+			Low:        bar.Low,
 		}
 		merge(&agg, bar)
 		out = append(out, agg)
@@ -295,10 +298,21 @@ func merge(agg *domain.Bar, bar domain.Bar) {
 	agg.Low = min(agg.Low, bar.Low)
 	agg.Close = bar.Close
 	agg.Volume += bar.Volume
-	agg.Ticks += bar.Ticks
 }
 
 func end(bar domain.Bar) time.Time { return bar.Start.Add(bar.Interval) }
+
+// instrumentOf identifies a tick's instrument. The symbol is "EXCHANGE:SYMBOL"
+// and empty when the token is not in the watchlist.
+func instrumentOf(t domain.Tick) domain.Instrument {
+	in := domain.Instrument{Token: t.InstrumentToken}
+	if ex, sym, ok := strings.Cut(t.Symbol, ":"); ok {
+		in.Exchange, in.Symbol = ex, sym
+	} else {
+		in.Symbol = t.Symbol
+	}
+	return in
+}
 
 // Sort orders bars by end time, then interval, then instrument token: the
 // order Builder emits, deterministic regardless of map iteration order.
@@ -310,6 +324,6 @@ func Sort(bars []domain.Bar) {
 		if c := cmp.Compare(a.Interval, b.Interval); c != 0 {
 			return c
 		}
-		return cmp.Compare(a.InstrumentToken, b.InstrumentToken)
+		return cmp.Compare(a.Instrument.Token, b.Instrument.Token)
 	})
 }

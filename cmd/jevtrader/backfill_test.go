@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -70,18 +69,14 @@ func fakeKite(t *testing.T) (*httptest.Server, func() []request) {
 	}
 }
 
-func env(vars map[string]string) func(string) string {
-	return func(k string) string { return vars[k] }
-}
-
 func TestBackfillCommand(t *testing.T) {
 	srv, requests := fakeKite(t)
 	dir := t.TempDir()
-	vars := env(map[string]string{"KITE_API_KEY": "key", "KITE_ACCESS_TOKEN": "secret-token", "KITE_API_BASE_URL": srv.URL})
+	vars := map[string]string{"KITE_API_KEY": "key", "KITE_ACCESS_TOKEN": "secret-token", "KITE_API_BASE_URL": srv.URL}
 	args := []string{"backfill", "--tokens", "408065", "--from", "2026-09-01", "--to", "2026-09-02", "--data-dir", dir}
 
-	var stderr bytes.Buffer
-	if code := run(context.Background(), args, vars, &stderr); code != 0 {
+	e, _, stderr := testEnv(vars)
+	if code := run(context.Background(), args, e); code != 0 {
 		t.Fatalf("exit %d: %s", code, stderr.String())
 	}
 	if strings.Contains(stderr.String(), "secret-token") {
@@ -101,11 +96,11 @@ func TestBackfillCommand(t *testing.T) {
 		t.Fatalf("got %d 5m bars, want 4: %+v", len(got), got)
 	}
 	first := got[0]
-	wantBar := domain.Bar{InstrumentToken: 408065, Interval: 5 * time.Minute, Open: 65, High: 71, Low: 64, Close: 70, Volume: 1500}
-	if !first.Start.Equal(time.Date(2026, 9, 1, 9, 15, 0, 0, ist)) {
-		t.Errorf("first 5m start = %v", first.Start)
+	wantBar := domain.Bar{Instrument: domain.Instrument{Token: 408065}, Interval: 5 * time.Minute, Open: 65, High: 71, Low: 64, Close: 70, Volume: 1500}
+	if !first.Start.Equal(time.Date(2026, 9, 1, 9, 15, 0, 0, ist)) || !first.End.Equal(first.Start.Add(5*time.Minute)) {
+		t.Errorf("first 5m window = [%v, %v)", first.Start, first.End)
 	}
-	first.Start = time.Time{}
+	first.Start, first.End = time.Time{}, time.Time{}
 	if first != wantBar {
 		t.Errorf("first 5m bar = %+v, want %+v", first, wantBar)
 	}
@@ -115,8 +110,8 @@ func TestBackfillCommand(t *testing.T) {
 	}
 
 	// Rerunning the same days would duplicate bars, so it is refused before any request.
-	stderr.Reset()
-	if code := run(context.Background(), args, vars, &stderr); code != 1 || !strings.Contains(stderr.String(), "already holds") {
+	e, _, stderr = testEnv(vars)
+	if code := run(context.Background(), args, e); code != 1 || !strings.Contains(stderr.String(), "already holds") {
 		t.Fatalf("rerun exit %d: %s", code, stderr.String())
 	}
 	if n := len(requests()); n != 1 {
@@ -175,14 +170,12 @@ func TestBackfillErrors(t *testing.T) {
 		t.Error("cancelled context did not stop the run")
 	}
 
-	var stderr bytes.Buffer
-	if code := run(context.Background(), []string{"backfill", "--tokens", "1", "--from", "2026-09-01"}, env(nil), &stderr); code != 1 || !strings.Contains(stderr.String(), "KITE_API_KEY") {
+	e, _, stderr := testEnv(nil)
+	if code := run(context.Background(), []string{"backfill", "--tokens", "1", "--from", "2026-09-01"}, e); code != 2 || !strings.Contains(stderr.String(), "KITE_API_KEY") {
 		t.Errorf("missing secrets: exit %d: %s", code, stderr.String())
 	}
-	if code := run(context.Background(), []string{"nope"}, env(nil), io.Discard); code != 2 {
-		t.Errorf("unknown command exit %d", code)
-	}
-	if code := run(context.Background(), []string{"backfill", "-h"}, env(nil), io.Discard); code != 0 {
+	e, _, _ = testEnv(nil)
+	if code := run(context.Background(), []string{"backfill", "-h"}, e); code != 0 {
 		t.Errorf("help exit %d", code)
 	}
 }

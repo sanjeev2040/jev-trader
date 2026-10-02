@@ -4,20 +4,22 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/parquet-go/parquet-go"
 
 	"github.com/sanjeev2040/jev-trader/internal/bars"
 	"github.com/sanjeev2040/jev-trader/internal/domain"
 )
 
-func at(h, m, s int) time.Time { return time.Date(2026, 10, 1, h, m, s, 0, ist) }
-
 func fixtureBar(token uint32, interval time.Duration, start time.Time, price float64) domain.Bar {
 	return domain.Bar{
-		InstrumentToken: token, Interval: interval, Start: start,
-		Open: price, High: price + 1, Low: price - 1, Close: price + 0.5, Volume: 1234, Ticks: 7,
+		Instrument: domain.Instrument{Token: token, Exchange: "NSE", Symbol: "INFY"},
+		Interval:   interval, Start: start, End: start.Add(interval),
+		Open: price, High: price + 1, Low: price - 1, Close: price + 0.5, Volume: 1234,
 	}
 }
 
@@ -31,7 +33,10 @@ func equalBars(t *testing.T, got, want []domain.Bar) {
 		if !g.Start.Equal(w.Start) {
 			t.Errorf("bar %d start = %v, want %v", i, g.Start, w.Start)
 		}
-		g.Start, w.Start = time.Time{}, time.Time{}
+		if !g.End.Equal(w.End) {
+			t.Errorf("bar %d end = %v, want %v", i, g.End, w.End)
+		}
+		g.Start, w.Start, g.End, w.End = time.Time{}, time.Time{}, time.Time{}, time.Time{}
 		if g != w {
 			t.Errorf("bar %d:\ngot  %+v\nwant %+v", i, got[i], want[i])
 		}
@@ -81,9 +86,9 @@ func TestBarRoundTripAndLayout(t *testing.T) {
 	writeBars(t, root, KindBars, in...)
 
 	wantFiles := []string{
-		"bars/date=2026-10-01/bars-0915-000.parquet",
-		"bars/date=2026-10-01/bars-0930-000.parquet",
 		"bars/date=2026-10-02/bars-0915-000.parquet",
+		"bars/date=2026-10-02/bars-0930-000.parquet",
+		"bars/date=2026-10-03/bars-0915-000.parquet",
 	}
 	if got := listFiles(t, root); !slices.Equal(got, wantFiles) {
 		t.Fatalf("files = %v, want %v", got, wantFiles)
@@ -186,7 +191,7 @@ func TestRestartAndCrashLeftovers(t *testing.T) {
 	writeBars(t, root, KindBars, a)
 
 	// A crashed run leaves a temporary file behind; it must be skipped, not reused or read.
-	dir := filepath.Join(root, "bars", "date=2026-10-01")
+	dir := filepath.Join(root, "bars", "date=2026-10-02")
 	if err := os.WriteFile(filepath.Join(dir, ".bars-0915-001.parquet.tmp"), []byte("partial"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -194,9 +199,9 @@ func TestRestartAndCrashLeftovers(t *testing.T) {
 	writeBars(t, root, KindBars, b)
 
 	want := []string{
-		"bars/date=2026-10-01/.bars-0915-001.parquet.tmp",
-		"bars/date=2026-10-01/bars-0915-000.parquet",
-		"bars/date=2026-10-01/bars-0915-002.parquet",
+		"bars/date=2026-10-02/.bars-0915-001.parquet.tmp",
+		"bars/date=2026-10-02/bars-0915-000.parquet",
+		"bars/date=2026-10-02/bars-0915-002.parquet",
 	}
 	if got := listFiles(t, root); !slices.Equal(got, want) {
 		t.Fatalf("files = %v, want %v", got, want)
@@ -224,13 +229,25 @@ func TestBackfillIsSeparateKind(t *testing.T) {
 
 func TestSchemaVersionIsChecked(t *testing.T) {
 	root := t.TempDir()
-	w := &writer[barRow]{root: root, kind: KindBars, schema: "bars/v0"}
-	if err := w.write(at(9, 15, 0), barToRow(fixtureBar(1, time.Minute, at(9, 15, 0), 1))); err != nil {
+	dir := filepath.Join(root, "bars", "date=2026-10-02")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.close(); err != nil {
+	f, err := os.Create(filepath.Join(dir, "bars-0915-000.parquet"))
+	if err != nil {
 		t.Fatal(err)
 	}
+	pw := parquet.NewGenericWriter[barRow](f,
+		parquet.KeyValueMetadata(MetaSchema, BarSchemaName),
+		parquet.KeyValueMetadata(MetaSchemaVersion, "99"),
+	)
+	if _, err := pw.Write([]barRow{barToRow(fixtureBar(1, time.Minute, at(9, 15, 0), 1))}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
 	if _, err := ReadBars(root, KindBars, BarQuery{}); err == nil {
 		t.Fatal("read a file with the wrong schema version")
 	}
@@ -253,52 +270,55 @@ func TestInvalidInputs(t *testing.T) {
 	}
 }
 
+// writeTicks records ticks with the tick writer ingestion uses, so the reader
+// is tested against the real on-disk contract.
 func writeTicks(t *testing.T, root string, ticks ...domain.Tick) {
 	t.Helper()
-	w := &writer[tickRow]{root: root, kind: KindTicks, schema: TickSchemaVersion}
+	w := NewTickWriter(root, 0)
 	for _, tk := range ticks {
-		if err := w.write(tk.ReceiveTime, tickToRow(tk)); err != nil {
+		if err := w.Write(tk); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := w.close(); err != nil {
+	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestScanTicks(t *testing.T) {
-	root := t.TempDir()
-	full := domain.Tick{
-		InstrumentToken: 408065, ExchangeTime: at(9, 15, 1), LastTradeTime: at(9, 15, 0),
-		ReceiveTime: at(9, 15, 2).Add(1234567), LastPrice: 1520.35, LastQuantity: 10,
-		AveragePrice: 1519.8, VolumeTraded: 125000, TotalBuyQty: 4000, TotalSellQty: 3500, OI: 0,
+func scanAll(t *testing.T, root string, q Query) []domain.Tick {
+	t.Helper()
+	var got []domain.Tick
+	if err := ScanTicks(root, q, func(tk domain.Tick) error { got = append(got, tk); return nil }); err != nil {
+		t.Fatal(err)
 	}
-	first := domain.Tick{InstrumentToken: 1, ExchangeTime: at(9, 15, 2), ReceiveTime: at(9, 15, 2), LastPrice: 1}
-	second := domain.Tick{InstrumentToken: 2, ExchangeTime: at(9, 15, 2), ReceiveTime: at(9, 15, 2), LastPrice: 2}
-	next := domain.Tick{InstrumentToken: 1, ExchangeTime: at(9, 30, 0), ReceiveTime: at(9, 30, 0), LastPrice: 3}
+	return got
+}
+
+func TestScanTicksReadsWriterFiles(t *testing.T) {
+	root := t.TempDir()
+	full := tickAt(408065, at(9, 15, 2).Add(1234567))
+	full.LastTradeTime = at(9, 15, 0).UTC()
+	full.OI = 5
+	first := tickAt(1, at(9, 15, 2))
+	first.LastTradeTime = time.Time{}
+	second := tickAt(2, at(9, 15, 2))
+	next := tickAt(1, at(9, 30, 0))
 	// Recorded slightly out of exchange-time order, as a live feed can be, and
 	// read back in recorded order.
 	writeTicks(t, root, first, second, full, next)
 
-	var got []domain.Tick
-	err := ScanTicks(root, Query{}, func(tk domain.Tick) error {
-		got = append(got, tk)
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	want := []domain.Tick{first, second, full, next}
+	got := scanAll(t, root, Query{})
 	if len(got) != len(want) {
 		t.Fatalf("got %d ticks, want %d", len(got), len(want))
 	}
 	for i := range want {
 		g, w := got[i], want[i]
-		if !g.ExchangeTime.Equal(w.ExchangeTime) || !g.LastTradeTime.Equal(w.LastTradeTime) || !g.ReceiveTime.Equal(w.ReceiveTime) {
+		if !g.ExchangeTime.Equal(w.ExchangeTime) || !g.LastTradeTime.Equal(w.LastTradeTime) || !g.ReceivedAt.Equal(w.ReceivedAt) {
 			t.Errorf("tick %d times = %+v, want %+v", i, g, w)
 		}
-		g.ExchangeTime, g.LastTradeTime, g.ReceiveTime = time.Time{}, time.Time{}, time.Time{}
-		w.ExchangeTime, w.LastTradeTime, w.ReceiveTime = time.Time{}, time.Time{}, time.Time{}
+		g.ExchangeTime, g.LastTradeTime, g.ReceivedAt = time.Time{}, time.Time{}, time.Time{}
+		w.ExchangeTime, w.LastTradeTime, w.ReceivedAt = time.Time{}, time.Time{}, time.Time{}
 		if g != w {
 			t.Errorf("tick %d = %+v, want %+v", i, got[i], want[i])
 		}
@@ -307,32 +327,86 @@ func TestScanTicks(t *testing.T) {
 		t.Errorf("unknown last trade time read back as %v", got[0].LastTradeTime)
 	}
 
-	got = nil
-	err = ScanTicks(root, Query{From: at(9, 15, 2), To: at(9, 30, 0), Tokens: []uint32{2}}, func(tk domain.Tick) error {
-		got = append(got, tk)
-		return nil
-	})
-	if err != nil || len(got) != 1 || got[0].InstrumentToken != 2 {
-		t.Fatalf("filtered = %+v, %v; want only token 2", got, err)
+	got = scanAll(t, root, Query{From: at(9, 15, 1), To: at(9, 29, 0), Tokens: []uint32{2}})
+	if len(got) != 1 || got[0].InstrumentToken != 2 {
+		t.Fatalf("filtered = %+v; want only token 2", got)
 	}
 
 	stop := errors.New("stop")
 	calls := 0
-	err = ScanTicks(root, Query{}, func(domain.Tick) error { calls++; return stop })
+	err := ScanTicks(root, Query{}, func(domain.Tick) error { calls++; return stop })
 	if !errors.Is(err, stop) || calls != 1 {
 		t.Fatalf("callback error not propagated: %v after %d calls", err, calls)
 	}
 }
 
+func TestScanTicksFileOrder(t *testing.T) {
+	root := t.TempDir()
+	// Restarts inside one window add -N suffixes that do not sort by name
+	// (-1 before the base file, -10 before -2), and a later window follows.
+	var wantPrices []float64
+	for run := range 12 {
+		w := NewTickWriter(root, 0)
+		price := float64(run + 1)
+		wantPrices = append(wantPrices, price)
+		tk := tickAt(1, at(9, 15, 2))
+		tk.LastPrice = price
+		if err := w.Write(tk); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	later := tickAt(1, at(9, 31, 0))
+	later.LastPrice = 99
+	writeTicks(t, root, later)
+	wantPrices = append(wantPrices, 99)
+
+	var gotPrices []float64
+	for _, tk := range scanAll(t, root, Query{}) {
+		gotPrices = append(gotPrices, tk.LastPrice)
+	}
+	if !reflect.DeepEqual(gotPrices, wantPrices) {
+		t.Fatalf("replay order = %v, want %v (files %v)", gotPrices, wantPrices, listFiles(t, root))
+	}
+}
+
+func TestScanTicksSkipsTempAndRejectsOtherSchemas(t *testing.T) {
+	root := t.TempDir()
+	writeTicks(t, root, tickAt(1, at(9, 15, 2)))
+	dir := filepath.Join(root, "ticks", "date=2026-10-02")
+	if err := os.WriteFile(filepath.Join(dir, ".ticks-091500-1.parquet.tmp"), []byte("partial"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := scanAll(t, root, Query{}); len(got) != 1 {
+		t.Fatalf("got %d ticks, want 1", len(got))
+	}
+	// A bar file under the tick kind is the wrong schema, not silently read.
+	bars := filepath.Join(root, "bars", "date=2026-10-02")
+	writeBars(t, root, KindBars, fixtureBar(1, time.Minute, at(9, 15, 0), 1))
+	if err := os.Rename(filepath.Join(bars, "bars-0915-000.parquet"), filepath.Join(dir, "ticks-093000.parquet")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ScanTicks(root, Query{}, func(domain.Tick) error { return nil }); err == nil {
+		t.Fatal("read a bar file as ticks")
+	}
+}
+
 func TestReplayedTicksBuildTheBarsLiveBuilt(t *testing.T) {
+	arrive := func(token uint32, exch time.Time, recv time.Time, price float64, vol int64) domain.Tick {
+		tk := tickAt(token, recv)
+		tk.ExchangeTime, tk.LastPrice, tk.Volume = exch.UTC(), price, vol
+		return tk
+	}
 	recv := func(ts time.Time) time.Time { return ts.Add(100 * time.Millisecond) }
 	// The 09:29:59 tick arrives after the 09:30:00 one, so it crosses into the
 	// next file window and is late for the live Builder.
 	arrived := []domain.Tick{
-		{InstrumentToken: 1, ExchangeTime: at(9, 29, 0), ReceiveTime: recv(at(9, 29, 0)), LastPrice: 100, VolumeTraded: 1000},
-		{InstrumentToken: 1, ExchangeTime: at(9, 30, 0), ReceiveTime: recv(at(9, 30, 0)), LastPrice: 101, VolumeTraded: 1100},
-		{InstrumentToken: 1, ExchangeTime: at(9, 29, 59), ReceiveTime: recv(at(9, 30, 0)).Add(time.Millisecond), LastPrice: 90, VolumeTraded: 1150},
-		{InstrumentToken: 1, ExchangeTime: at(9, 30, 30), ReceiveTime: recv(at(9, 30, 30)), LastPrice: 102, VolumeTraded: 1200},
+		arrive(1, at(9, 29, 0), recv(at(9, 29, 0)), 100, 1000),
+		arrive(1, at(9, 30, 0), recv(at(9, 30, 0)), 101, 1100),
+		arrive(1, at(9, 29, 59), recv(at(9, 30, 0)).Add(time.Millisecond), 90, 1150),
+		arrive(1, at(9, 30, 30), recv(at(9, 30, 30)), 102, 1200),
 	}
 	build := func(ticks func(func(domain.Tick) error) error) ([]domain.Bar, bars.Stats) {
 		t.Helper()
@@ -362,9 +436,10 @@ func TestReplayedTicksBuildTheBarsLiveBuilt(t *testing.T) {
 	if liveStats.Late != 1 || replayStats != liveStats {
 		t.Fatalf("stats live %+v, replay %+v; want one late tick in both", liveStats, replayStats)
 	}
+	in := domain.Instrument{Token: 1, Exchange: "NSE", Symbol: "INFY"}
 	equalBars(t, live, []domain.Bar{
-		{InstrumentToken: 1, Interval: time.Minute, Start: at(9, 29, 0), Open: 100, High: 100, Low: 100, Close: 100, Ticks: 1},
-		{InstrumentToken: 1, Interval: time.Minute, Start: at(9, 30, 0), Open: 101, High: 102, Low: 101, Close: 102, Volume: 200, Ticks: 2},
+		{Instrument: in, Interval: time.Minute, Start: at(9, 29, 0), End: at(9, 30, 0), Open: 100, High: 100, Low: 100, Close: 100},
+		{Instrument: in, Interval: time.Minute, Start: at(9, 30, 0), End: at(9, 31, 0), Open: 101, High: 102, Low: 101, Close: 102, Volume: 200},
 	})
 	equalBars(t, replayed, live)
 }

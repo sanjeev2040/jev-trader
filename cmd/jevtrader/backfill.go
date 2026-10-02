@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"path/filepath"
 	"slices"
@@ -42,7 +41,28 @@ type backfillJob struct {
 	dataDir  string
 }
 
-func runBackfill(ctx context.Context, args []string, env func(string) string, stderr io.Writer) error {
+func runBackfill(ctx context.Context, args []string, e env) int {
+	if err := backfill(ctx, args, e); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		fmt.Fprintf(e.stderr, "jevtrader backfill: %v\n", err)
+		var u usageError
+		if errors.As(err, &u) {
+			return 2
+		}
+		return 1
+	}
+	return 0
+}
+
+// usageError marks a mistake in the command line rather than a failed run.
+type usageError struct{ error }
+
+func (e usageError) Unwrap() error { return e.error }
+
+func backfill(ctx context.Context, args []string, e env) error {
+	stderr := e.stderr
 	fs := flag.NewFlagSet("backfill", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	tokens := fs.String("tokens", "", "comma-separated Kite instrument tokens (required)")
@@ -57,22 +77,24 @@ func runBackfill(ctx context.Context, args []string, env func(string) string, st
 		fmt.Fprintln(stderr, "\nflags:")
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(args); errors.Is(err, flag.ErrHelp) {
-		return nil
-	} else if err != nil {
-		return err
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return err
+		}
+		return usageError{err}
 	}
 	if fs.NArg() > 0 {
-		return fmt.Errorf("unexpected arguments %q", fs.Args())
+		return usageError{fmt.Errorf("unexpected arguments %q", fs.Args())}
 	}
 	job, err := parseBackfill(*tokens, *from, *to, *derived, *dataDir)
 	if err != nil {
-		return err
+		return usageError{err}
 	}
 
+	env := func(k string) string { v, _ := e.lookup(k); return v }
 	apiKey, accessToken := env("KITE_API_KEY"), env("KITE_ACCESS_TOKEN")
 	if apiKey == "" || accessToken == "" {
-		return errors.New("KITE_API_KEY and KITE_ACCESS_TOKEN must be set (run jevtrader login for the daily access token)")
+		return usageError{errors.New("KITE_API_KEY and KITE_ACCESS_TOKEN must be set (run jevtrader login for the daily access token)")}
 	}
 	kite := kiteconnect.New(apiKey)
 	kite.SetAccessToken(accessToken)
@@ -198,14 +220,15 @@ func (job backfillJob) fetchChunk(ctx context.Context, kite historian, limiter *
 				return nil, fmt.Errorf("historical data for %d: negative volume at %v", token, c.Date.Time)
 			}
 			ones = append(ones, domain.Bar{
-				InstrumentToken: token,
-				Interval:        time.Minute,
-				Start:           c.Date.Time,
-				Open:            c.Open,
-				High:            c.High,
-				Low:             c.Low,
-				Close:           c.Close,
-				Volume:          uint64(c.Volume),
+				Instrument: domain.Instrument{Token: token},
+				Interval:   time.Minute,
+				Start:      c.Date.Time,
+				End:        c.Date.Time.Add(time.Minute),
+				Open:       c.Open,
+				High:       c.High,
+				Low:        c.Low,
+				Close:      c.Close,
+				Volume:     int64(c.Volume),
 			})
 		}
 		out = append(out, ones...)

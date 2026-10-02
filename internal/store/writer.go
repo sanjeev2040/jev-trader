@@ -27,15 +27,15 @@ func NewBarWriter(root, kind string) (*BarWriter, error) {
 	if kind != KindBars && kind != KindBackfill {
 		return nil, fmt.Errorf("store: %q is not a bar kind", kind)
 	}
-	return &BarWriter{w: &writer[barRow]{root: root, kind: kind, schema: BarSchemaVersion}}, nil
+	return &BarWriter{w: &writer[barRow]{root: root, kind: kind}}, nil
 }
 
 // Write appends bars. A bar whose closing window differs from the open file's
 // closes that file and opens another.
 func (w *BarWriter) Write(bars ...domain.Bar) error {
 	for _, b := range bars {
-		if b.Interval <= 0 || b.Interval%time.Second != 0 {
-			return fmt.Errorf("store: bar interval %v is not a whole number of seconds", b.Interval)
+		if b.Interval <= 0 || b.Interval%time.Second != 0 || !b.End.Equal(b.Start.Add(b.Interval)) {
+			return fmt.Errorf("store: bar interval %v is not a whole number of seconds, or the bar does not end at start+interval", b.Interval)
 		}
 		if err := w.w.write(barTime(b), barToRow(b)); err != nil {
 			return err
@@ -53,8 +53,8 @@ func (w *BarWriter) Close() error { return w.w.close() }
 
 // writer is the shared rotating Parquet writer for one kind of row.
 type writer[R any] struct {
-	root, kind, schema string
-	cur                *openFile[R]
+	root, kind string
+	cur        *openFile[R]
 }
 
 type openFile[R any] struct {
@@ -110,8 +110,9 @@ func (w *writer[R]) open(window time.Time) error {
 		}
 		pw := parquet.NewGenericWriter[R](f,
 			parquet.Compression(&parquet.Zstd),
-			parquet.KeyValueMetadata(SchemaKey, w.schema),
-			parquet.KeyValueMetadata(KindKey, w.kind),
+			parquet.KeyValueMetadata(MetaSchema, BarSchemaName),
+			parquet.KeyValueMetadata(MetaSchemaVersion, barSchemaVersion),
+			parquet.KeyValueMetadata(MetaKind, w.kind),
 		)
 		w.cur = &openFile[R]{window: window, tmp: tmp, final: final, f: f, pw: pw}
 		return nil

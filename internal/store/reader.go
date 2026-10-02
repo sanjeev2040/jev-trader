@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,10 +51,14 @@ func ScanTicks(root string, q Query, fn func(domain.Tick) error) error {
 	if !to.IsZero() {
 		to = to.Add(24 * time.Hour)
 	}
-	return scan(root, KindTicks, TickSchemaVersion, q.From, to, func(rows []tickRow) error {
+	return scan(root, KindTicks, "ticks", strconv.Itoa(TickSchemaVersion), q.From, to, func(rows []TickRow) error {
 		for _, r := range rows {
 			t := rowToTick(r)
-			if !q.match(t.InstrumentToken, t.ExchangeTime) {
+			ts := t.ExchangeTime
+			if ts.IsZero() {
+				ts = t.ReceivedAt
+			}
+			if !q.match(t.InstrumentToken, ts) {
 				continue
 			}
 			if err := fn(t); err != nil {
@@ -76,22 +81,22 @@ func ScanBars(root, kind string, q BarQuery, fn func(domain.Bar) error) error {
 	if !to.IsZero() {
 		to = to.Add(24 * time.Hour)
 	}
-	return scan(root, kind, BarSchemaVersion, q.From, to, func(rows []barRow) error {
+	return scan(root, kind, BarSchemaName, barSchemaVersion, q.From, to, func(rows []barRow) error {
 		bars := make([]domain.Bar, 0, len(rows))
 		for _, r := range rows {
 			b := rowToBar(r)
-			if (q.Interval == 0 || b.Interval == q.Interval) && q.match(b.InstrumentToken, b.Start) {
+			if (q.Interval == 0 || b.Interval == q.Interval) && q.match(b.Instrument.Token, b.Start) {
 				bars = append(bars, b)
 			}
 		}
 		slices.SortStableFunc(bars, func(a, b domain.Bar) int {
-			if c := a.Start.Add(a.Interval).Compare(b.Start.Add(b.Interval)); c != 0 {
+			if c := a.End.Compare(b.End); c != 0 {
 				return c
 			}
 			if c := cmp.Compare(a.Interval, b.Interval); c != 0 {
 				return c
 			}
-			return cmp.Compare(a.InstrumentToken, b.InstrumentToken)
+			return cmp.Compare(a.Instrument.Token, b.Instrument.Token)
 		})
 		for _, b := range bars {
 			if err := fn(b); err != nil {
@@ -115,7 +120,7 @@ func ReadBars(root, kind string, q BarQuery) ([]domain.Bar, error) {
 // scan reads the files of kind one window at a time, in time order, and
 // passes each window's rows to fn. Only date partitions that can hold rows in
 // [from, to) are opened. A missing kind directory holds no rows.
-func scan[R any](root, kind, schema string, from, to time.Time, fn func([]R) error) error {
+func scan[R any](root, kind, schema, version string, from, to time.Time, fn func([]R) error) error {
 	dates, err := os.ReadDir(filepath.Join(root, kind))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -143,7 +148,7 @@ func scan[R any](root, kind, schema string, from, to time.Time, fn func([]R) err
 		for _, files := range windows {
 			var rows []R
 			for _, path := range files {
-				rows, err = readFile(path, schema, rows)
+				rows, err = readFile(path, schema, version, rows)
 				if err != nil {
 					return err
 				}
@@ -157,34 +162,58 @@ func scan[R any](root, kind, schema string, from, to time.Time, fn func([]R) err
 }
 
 // windowFiles groups a date directory's published files by window, in window
-// then sequence order. Hidden temporary files are skipped.
+// then sequence order. Files are named <kind>-<window>[-<seq>].parquet; the
+// window is HHMMSS for ticks and HHMM for bars. Hidden temporary files and
+// other names are skipped.
 func windowFiles(dir, kind string) ([][]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
-	var groups [][]string
-	last := ""
-	for _, e := range entries { // sorted: <kind>-HHMM-NNN.parquet
+	type file struct {
+		window string
+		seq    int
+		path   string
+	}
+	var files []file
+	for _, e := range entries {
 		name := e.Name()
 		rest, ok := strings.CutPrefix(name, kind+"-")
-		if e.IsDir() || !ok || !strings.HasSuffix(name, ".parquet") || len(rest) < 4 {
+		rest, ok2 := strings.CutSuffix(rest, ".parquet")
+		if e.IsDir() || !ok || !ok2 {
 			continue
 		}
-		path := filepath.Join(dir, name)
-		if window := rest[:4]; window != last || len(groups) == 0 {
-			groups = append(groups, []string{path})
-			last = window
-		} else {
-			groups[len(groups)-1] = append(groups[len(groups)-1], path)
+		window, seq, _ := strings.Cut(rest, "-")
+		n := 0
+		if seq != "" {
+			if n, err = strconv.Atoi(seq); err != nil {
+				continue
+			}
 		}
+		if window == "" || strings.Trim(window, "0123456789") != "" {
+			continue
+		}
+		files = append(files, file{window, n, filepath.Join(dir, name)})
+	}
+	slices.SortFunc(files, func(a, b file) int {
+		if c := cmp.Compare(a.window, b.window); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.seq, b.seq)
+	})
+	var groups [][]string
+	for i, f := range files {
+		if i == 0 || f.window != files[i-1].window {
+			groups = append(groups, nil)
+		}
+		groups[len(groups)-1] = append(groups[len(groups)-1], f.path)
 	}
 	return groups, nil
 }
 
 // readFile appends the rows of one file to rows after checking its schema
 // version.
-func readFile[R any](path, schema string, rows []R) ([]R, error) {
+func readFile[R any](path, schema, version string, rows []R) ([]R, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return rows, fmt.Errorf("store: %w", err)
@@ -198,8 +227,10 @@ func readFile[R any](path, schema string, rows []R) ([]R, error) {
 	if err != nil {
 		return rows, fmt.Errorf("store: open %s: %w", path, err)
 	}
-	if got, _ := pf.Lookup(SchemaKey); got != schema {
-		return rows, fmt.Errorf("store: %s has schema %q, want %q", path, got, schema)
+	gotSchema, _ := pf.Lookup(MetaSchema)
+	gotVersion, _ := pf.Lookup(MetaSchemaVersion)
+	if gotSchema != schema || gotVersion != version {
+		return rows, fmt.Errorf("store: %s has schema %q v%q, want %q v%q", path, gotSchema, gotVersion, schema, version)
 	}
 	r := parquet.NewGenericReader[R](pf)
 	defer r.Close()
@@ -214,4 +245,43 @@ func readFile[R any](path, schema string, rows []R) ([]R, error) {
 			return rows, fmt.Errorf("store: read %s: %w", path, err)
 		}
 	}
+}
+
+// rowToTick converts a stored tick back to a domain tick. Depth lists shorter
+// than the book hold zero levels for the rest.
+func rowToTick(r TickRow) domain.Tick {
+	t := domain.Tick{
+		InstrumentToken:   uint32(r.InstrumentToken),
+		Symbol:            r.Symbol,
+		ExchangeTime:      utcOrZero(r.ExchangeTS),
+		ReceivedAt:        utcOrZero(r.ReceivedTS),
+		LastTradeTime:     utcOrZero(r.LastTradeTS),
+		LastPrice:         r.LastPrice,
+		LastQuantity:      r.LastQuantity,
+		AveragePrice:      r.AveragePrice,
+		Volume:            r.Volume,
+		TotalBuyQuantity:  r.TotalBuyQty,
+		TotalSellQuantity: r.TotalSellQty,
+		Open:              r.Open,
+		High:              r.High,
+		Low:               r.Low,
+		Close:             r.Close,
+		OI:                r.OI,
+	}
+	for i := range t.Bids {
+		if i < len(r.BidPrice) && i < len(r.BidQuantity) && i < len(r.BidOrders) {
+			t.Bids[i] = domain.DepthLevel{Price: r.BidPrice[i], Quantity: r.BidQuantity[i], Orders: r.BidOrders[i]}
+		}
+		if i < len(r.AskPrice) && i < len(r.AskQuantity) && i < len(r.AskOrders) {
+			t.Asks[i] = domain.DepthLevel{Price: r.AskPrice[i], Quantity: r.AskQuantity[i], Orders: r.AskOrders[i]}
+		}
+	}
+	return t
+}
+
+func utcOrZero(t time.Time) time.Time {
+	if t.IsZero() {
+		return t
+	}
+	return t.UTC()
 }
