@@ -55,7 +55,9 @@ fi
 printf '%s\n' "$tag" > "$last_good_file"
 printf '%s\n' "$image" > "$RUN_DIR/image"
 log "image $image is ready"
-docker image prune --all --force --filter 'until=720h' > /dev/null || true
+docker image ls --format '{{.Repository}}:{{.Tag}}' "$ACR_LOGIN_SERVER/jevtrader" |
+  grep -vxF "$image" | xargs -r docker rmi > /dev/null 2>&1 || true
+docker image prune --force > /dev/null || true
 
 # 3. Secrets: Key Vault -> a 0600 file on tmpfs, read by systemd as an
 # EnvironmentFile and by jevtrader-login. Never written to disk or logged.
