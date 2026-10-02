@@ -25,7 +25,8 @@ type env struct {
 }
 
 var commands = map[string]command{
-	"login": {summary: "daily Kite Connect login; saves the access token", run: runLogin},
+	"backfill": {summary: "fetch historical 1m candles from Kite and store them as bars", run: runBackfill},
+	"login":    {summary: "daily Kite Connect login; saves the access token", run: runLogin},
 }
 
 func main() {
