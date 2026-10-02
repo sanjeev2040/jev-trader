@@ -5,30 +5,13 @@ import "time"
 // OrderType is the broker order type.
 type OrderType string
 
-// Order types. Market orders must carry non-zero market protection.
+// Order types. The order manager derives the type from the approved
+// intent (see orders.SpecFor). Market orders must carry non-zero market
+// protection.
 const (
 	OrderTypeLimit  OrderType = "LIMIT"
 	OrderTypeMarket OrderType = "MARKET"
 )
-
-// OrderIntent is an order the system wants placed. A risk.Approval carries
-// exactly one intent.
-type OrderIntent struct {
-	// CycleID identifies the decision cycle (a Jev decision or a risk-driven
-	// exit) that produced the intent.
-	CycleID string
-	// ClientID is the deterministic id derived from CycleID. It is sent to the
-	// broker as the order tag and makes placement idempotent.
-	ClientID   string
-	Instrument Instrument
-	Side       Action // ActionBuy or ActionSell
-	Quantity   int64
-	Type       OrderType
-	LimitPrice float64 // required for OrderTypeLimit
-	// MarketProtection is the market-protection percentage for a market
-	// order. Kite rejects market orders whose protection is zero.
-	MarketProtection float64
-}
 
 // OrderStatus is the broker-side state of an order.
 type OrderStatus string
@@ -55,14 +38,4 @@ type OrderUpdate struct {
 	Costs  float64
 	Reason string // rejection or cancellation message
 	Time   time.Time
-}
-
-// Fill is a quantity executed at one price.
-type Fill struct {
-	ClientID string
-	BrokerID string
-	Quantity int64
-	Price    float64
-	Costs    float64
-	Time     time.Time
 }

@@ -8,7 +8,6 @@ import (
 	"github.com/sanjeev2040/jev-trader/internal/domain"
 	"github.com/sanjeev2040/jev-trader/internal/orders"
 	"github.com/sanjeev2040/jev-trader/internal/orders/paper"
-	"github.com/sanjeev2040/jev-trader/internal/risk"
 )
 
 type clockAt struct{ now time.Time }
@@ -30,12 +29,12 @@ func TestManagerWithPaperBroker(t *testing.T) {
 	if _, err := m.Reconcile(ctx, nil); err != nil {
 		t.Fatal(err)
 	}
-	a := risk.ApprovalForTest(t, limitIntent("c1"))
+	a := approve(t, "c1")
 	o, err := m.Submit(ctx, a)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b.OnTick(domain.Tick{Token: infy.Token, LastPrice: 1499, ExchangeTime: t0.Add(time.Second)})
+	b.OnTick(domain.Tick{Token: infy.Token, LastPrice: 249, ExchangeTime: t0.Add(time.Second)})
 
 	var fills []domain.Fill
 	for len(b.Updates()) > 0 {
@@ -47,12 +46,12 @@ func TestManagerWithPaperBroker(t *testing.T) {
 			fills = append(fills, *f)
 		}
 	}
-	got, _ := m.Order(o.Intent.ClientID)
-	if got.Status != orders.StatusFilled || got.FilledQuantity != 100 || len(fills) != 1 {
+	got, _ := m.Order(orders.ClientID(o.Intent.CycleID))
+	if got.Status != orders.StatusFilled || got.FilledQuantity != entryQuantity || len(fills) != 1 {
 		t.Fatalf("order %+v, fills %+v", got, fills)
 	}
-	// 2 bps on 1499 is 1499.30, inside the 1500 limit.
-	if fills[0].Price != 1499.3 || fills[0].Costs <= 0 {
+	// 2 bps on 249 rounds up to 249.05, inside the 250 limit.
+	if fills[0].Price != 249.05 || fills[0].Charges <= 0 {
 		t.Errorf("fill %+v", fills[0])
 	}
 	if _, err := m.Submit(ctx, a); err == nil {

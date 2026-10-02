@@ -7,27 +7,11 @@ import (
 	"math"
 	"regexp"
 	"testing"
-	"time"
 
 	"github.com/sanjeev2040/jev-trader/internal/domain"
 	"github.com/sanjeev2040/jev-trader/internal/orders"
 	"github.com/sanjeev2040/jev-trader/internal/risk"
 )
-
-var t0 = time.Date(2026, 10, 1, 10, 0, 0, 0, time.FixedZone("IST", 19800))
-
-var infy = domain.Instrument{Token: 408065, Exchange: "NSE", Symbol: "INFY"}
-
-func limitIntent(cycle string) domain.OrderIntent {
-	return domain.OrderIntent{
-		CycleID:    cycle,
-		Instrument: infy,
-		Side:       domain.ActionBuy,
-		Quantity:   100,
-		Type:       domain.OrderTypeLimit,
-		LimitPrice: 1500,
-	}
-}
 
 // fakeBroker records calls and checks that every placed intent was journaled
 // first.
@@ -42,7 +26,7 @@ type fakeBroker struct {
 }
 
 func (b *fakeBroker) Place(_ context.Context, o domain.OrderIntent) (string, error) {
-	if !b.journal.has(o.ClientID) {
+	if !b.journal.has(orders.ClientID(o.CycleID)) {
 		b.unjournaledPlace = true
 	}
 	b.placed = append(b.placed, o)
@@ -79,7 +63,7 @@ func (j *memJournal) RecordIntent(_ context.Context, o domain.OrderIntent) error
 
 func (j *memJournal) has(clientID string) bool {
 	for _, o := range j.intents {
-		if o.ClientID == clientID {
+		if orders.ClientID(o.CycleID) == clientID {
 			return true
 		}
 	}
@@ -115,26 +99,28 @@ func TestClientID(t *testing.T) {
 }
 
 func TestValidateIntent(t *testing.T) {
-	valid := limitIntent("c1")
-	valid.ClientID = orders.ClientID("c1")
-	market := valid
-	market.Type, market.LimitPrice, market.MarketProtection = domain.OrderTypeMarket, 0, 2
-	if err := orders.ValidateIntent(valid); err != nil {
-		t.Errorf("limit intent: %v", err)
+	valid := intentOf(t, "c1")
+	exit := approveExit(t, "c2").Intent()
+	for name, o := range map[string]domain.OrderIntent{"entry": valid, "exit": exit} {
+		if err := orders.ValidateIntent(o); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
-	if err := orders.ValidateIntent(market); err != nil {
-		t.Errorf("market intent: %v", err)
+	noPrice := valid
+	noPrice.RefPrice = 0
+	if err := orders.ValidateIntent(noPrice); err != nil {
+		t.Errorf("no reference price: %v", err)
 	}
 	cases := map[string]func(*domain.OrderIntent){
-		"no cycle":           func(o *domain.OrderIntent) { o.CycleID = "" },
-		"foreign client id":  func(o *domain.OrderIntent) { o.ClientID = "manual1" },
-		"no symbol":          func(o *domain.OrderIntent) { o.Instrument.Symbol = "" },
-		"hold side":          func(o *domain.OrderIntent) { o.Side = domain.ActionHold },
-		"zero quantity":      func(o *domain.OrderIntent) { o.Quantity = 0 },
-		"no limit price":     func(o *domain.OrderIntent) { o.LimitPrice = 0 },
-		"NaN limit price":    func(o *domain.OrderIntent) { o.LimitPrice = math.NaN() },
-		"unknown type":       func(o *domain.OrderIntent) { o.Type = "SL-M" },
-		"unprotected market": func(o *domain.OrderIntent) { o.Type = domain.OrderTypeMarket },
+		"no cycle":       func(o *domain.OrderIntent) { o.CycleID = "" },
+		"no symbol":      func(o *domain.OrderIntent) { o.Instrument.Symbol = "" },
+		"no exchange":    func(o *domain.OrderIntent) { o.Instrument.Exchange = "" },
+		"hold side":      func(o *domain.OrderIntent) { o.Side = domain.ActionHold },
+		"zero quantity":  func(o *domain.OrderIntent) { o.Quantity = 0 },
+		"negative price": func(o *domain.OrderIntent) { o.RefPrice = -1 },
+		"NaN price":      func(o *domain.OrderIntent) { o.RefPrice = math.NaN() },
+		"infinite price": func(o *domain.OrderIntent) { o.RefPrice = math.Inf(1) },
+		"sub-tick price": func(o *domain.OrderIntent) { o.RefPrice = 0.01 },
 	}
 	for name, mutate := range cases {
 		o := valid
@@ -142,6 +128,26 @@ func TestValidateIntent(t *testing.T) {
 		if err := orders.ValidateIntent(o); !errors.Is(err, orders.ErrInvalidIntent) {
 			t.Errorf("%s: err = %v, want ErrInvalidIntent", name, err)
 		}
+	}
+}
+
+func TestSpecFor(t *testing.T) {
+	entry := intentOf(t, "c1")
+	if got := orders.SpecFor(entry); got != (orders.Spec{Type: domain.OrderTypeLimit, LimitPrice: entryPrice}) {
+		t.Errorf("entry spec = %+v", got)
+	}
+	// A risk exit must get out, so it is a protected market order.
+	want := orders.Spec{Type: domain.OrderTypeMarket, MarketProtection: orders.MarketProtectionPct}
+	if got := orders.SpecFor(approveExit(t, "c2").Intent()); got != want {
+		t.Errorf("exit spec = %+v, want %+v", got, want)
+	}
+	entry.RefPrice = 0
+	if got := orders.SpecFor(entry); got != want {
+		t.Errorf("unpriced spec = %+v, want %+v", got, want)
+	}
+	entry.RefPrice = 1234.5678
+	if got := orders.SpecFor(entry); got.LimitPrice != 1234.55 {
+		t.Errorf("limit price %v not rounded to the tick", got.LimitPrice)
 	}
 }
 
@@ -158,7 +164,7 @@ func TestSubmitBeforeReconcile(t *testing.T) {
 	j := &memJournal{}
 	b := &fakeBroker{journal: j}
 	m, _ := orders.NewManager(b, j)
-	_, err := m.Submit(context.Background(), risk.ApprovalForTest(t, limitIntent("c1")))
+	_, err := m.Submit(context.Background(), approve(t, "c1"))
 	if !errors.Is(err, orders.ErrNotReconciled) {
 		t.Fatalf("err = %v, want ErrNotReconciled", err)
 	}
@@ -177,36 +183,24 @@ func TestSubmitZeroApproval(t *testing.T) {
 	}
 }
 
-func TestSubmitInvalidIntent(t *testing.T) {
-	m, b, j := newManager(t)
-	bad := limitIntent("c1")
-	bad.ClientID = "manual1"
-	if _, err := m.Submit(context.Background(), risk.ApprovalForTest(t, bad)); !errors.Is(err, orders.ErrInvalidIntent) {
-		t.Fatalf("err = %v, want ErrInvalidIntent", err)
-	}
-	if len(b.placed)+len(j.intents) != 0 {
-		t.Error("invalid intent was recorded or placed")
-	}
-}
-
 func TestSubmitRecordsThenPlacesOnce(t *testing.T) {
 	m, b, j := newManager(t)
 	ctx := context.Background()
-	a := risk.ApprovalForTest(t, limitIntent("c1"))
+	a := approve(t, "c1")
 
 	o, err := m.Submit(ctx, a)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := orders.ClientID("c1")
-	if o.Intent.ClientID != want || o.BrokerID != "B1" || o.Status != orders.StatusPending {
+	if orders.ClientID(o.Intent.CycleID) != want || o.BrokerID != "B1" || o.Status != orders.StatusPending {
 		t.Fatalf("order = %+v", o)
 	}
 	if len(j.intents) != 1 || b.unjournaledPlace {
 		t.Fatalf("intent not journaled before Place: journal %v", j.intents)
 	}
-	if b.placed[0].ClientID != want {
-		t.Errorf("placed tag %q, want %q", b.placed[0].ClientID, want)
+	if orders.ClientID(b.placed[0].CycleID) != want {
+		t.Errorf("placed tag %q, want %q", orders.ClientID(b.placed[0].CycleID), want)
 	}
 
 	again, err := m.Submit(ctx, a)
@@ -221,7 +215,7 @@ func TestSubmitRecordsThenPlacesOnce(t *testing.T) {
 func TestSubmitJournalFailurePlacesNothing(t *testing.T) {
 	m, b, j := newManager(t)
 	ctx := context.Background()
-	a := risk.ApprovalForTest(t, limitIntent("c1"))
+	a := approve(t, "c1")
 	j.err = errors.New("disk full")
 	if _, err := m.Submit(ctx, a); err == nil {
 		t.Fatal("Submit succeeded without a journal record")
@@ -242,11 +236,14 @@ func TestSubmitJournalFailurePlacesNothing(t *testing.T) {
 func TestSubmitPlaceFailureIsNotRetried(t *testing.T) {
 	m, b, _ := newManager(t)
 	ctx := context.Background()
-	a := risk.ApprovalForTest(t, limitIntent("c1"))
+	a := approve(t, "c1")
 	b.placeErr = errors.New("timeout")
 	o, err := m.Submit(ctx, a)
 	if err == nil || o.Status != orders.StatusPlaceFailed {
 		t.Fatalf("order %+v, err %v", o, err)
+	}
+	if open := m.Open(); len(open) != 1 {
+		t.Fatalf("Open() = %+v, want the order whose placement is unknown", open)
 	}
 	// The broker may have the order anyway, so it is never placed twice.
 	b.placeErr = nil
@@ -257,16 +254,40 @@ func TestSubmitPlaceFailureIsNotRetried(t *testing.T) {
 		t.Fatalf("%d placements, want 1", len(b.placed))
 	}
 	// A later update for the tag revives the order.
-	got, _, err := m.Apply(domain.OrderUpdate{ClientID: o.Intent.ClientID, BrokerID: "K9", Status: domain.OrderStatusOpen})
+	got, _, err := m.Apply(domain.OrderUpdate{ClientID: orders.ClientID(o.Intent.CycleID), BrokerID: "K9", Status: domain.OrderStatusOpen})
 	if err != nil || got.Status != orders.StatusOpen || got.BrokerID != "K9" {
 		t.Fatalf("revived order %+v, err %v", got, err)
 	}
 }
 
+func TestSubmitDefiniteRejectionIsTerminal(t *testing.T) {
+	m, b, _ := newManager(t)
+	ctx := context.Background()
+	a := approve(t, "c1")
+	b.placeErr = fmt.Errorf("%w: invalid tradingsymbol", orders.ErrNotPlaced)
+	o, err := m.Submit(ctx, a)
+	if !errors.Is(err, orders.ErrNotPlaced) || o.Status != orders.StatusRejected || o.Reason != b.placeErr.Error() {
+		t.Fatalf("order %+v, err %v", o, err)
+	}
+	if open := m.Open(); len(open) != 0 {
+		t.Errorf("Open() = %+v, want none", open)
+	}
+	if err := m.Cancel(ctx, orders.ClientID(o.Intent.CycleID)); !errors.Is(err, orders.ErrOrderClosed) {
+		t.Errorf("cancel: err = %v, want ErrOrderClosed", err)
+	}
+	b.placeErr = nil
+	if _, err := m.Submit(ctx, a); !errors.Is(err, orders.ErrAlreadySubmitted) {
+		t.Fatalf("err = %v, want ErrAlreadySubmitted", err)
+	}
+	if len(b.placed) != 1 {
+		t.Fatalf("%d placements, want 1", len(b.placed))
+	}
+}
+
 func TestApplyTracksFills(t *testing.T) {
 	m, _, _ := newManager(t)
-	o, _ := m.Submit(context.Background(), risk.ApprovalForTest(t, limitIntent("c1")))
-	id := o.Intent.ClientID
+	o, _ := m.Submit(context.Background(), approve(t, "c1"))
+	id := orders.ClientID(o.Intent.CycleID)
 	up := func(status domain.OrderStatus, filled int64, avg, costs float64) domain.OrderUpdate {
 		return domain.OrderUpdate{ClientID: id, BrokerID: "B1", Status: status, FilledQuantity: filled, AveragePrice: avg, Costs: costs, Time: t0}
 	}
@@ -297,7 +318,7 @@ func TestApplyTracksFills(t *testing.T) {
 			t.Errorf("step %d: unexpected fill %+v", i, *fill)
 		case s.fillQty != 0 && fill == nil:
 			t.Errorf("step %d: missing fill", i)
-		case fill != nil && (fill.Quantity != s.fillQty || math.Abs(fill.Price-s.fillPx) > 1e-9 || fill.Costs != s.fillCost || fill.ClientID != id):
+		case fill != nil && (fill.Quantity != s.fillQty || math.Abs(fill.Price-s.fillPx) > 1e-9 || fill.Charges != s.fillCost || fill.ClientID != id):
 			t.Errorf("step %d: fill %+v, want %d @ %v costs %v", i, *fill, s.fillQty, s.fillPx, s.fillCost)
 		}
 	}
@@ -312,7 +333,7 @@ func TestApplyTracksFills(t *testing.T) {
 
 func TestApplyMatchesByBrokerID(t *testing.T) {
 	m, _, _ := newManager(t)
-	o, _ := m.Submit(context.Background(), risk.ApprovalForTest(t, limitIntent("c1")))
+	o, _ := m.Submit(context.Background(), approve(t, "c1"))
 	got, _, err := m.Apply(domain.OrderUpdate{BrokerID: o.BrokerID, Status: domain.OrderStatusRejected, Reason: "margin"})
 	if err != nil || got.Status != orders.StatusRejected || got.Reason != "margin" {
 		t.Fatalf("order %+v, err %v", got, err)
@@ -321,8 +342,8 @@ func TestApplyMatchesByBrokerID(t *testing.T) {
 
 func TestApplyErrors(t *testing.T) {
 	m, _, _ := newManager(t)
-	o, _ := m.Submit(context.Background(), risk.ApprovalForTest(t, limitIntent("c1")))
-	id := o.Intent.ClientID
+	o, _ := m.Submit(context.Background(), approve(t, "c1"))
+	id := orders.ClientID(o.Intent.CycleID)
 
 	if _, _, err := m.Apply(domain.OrderUpdate{ClientID: "manual", BrokerID: "X"}); !errors.Is(err, orders.ErrUnknownOrder) {
 		t.Errorf("unknown: err = %v", err)
@@ -339,8 +360,8 @@ func TestApplyErrors(t *testing.T) {
 func TestCancel(t *testing.T) {
 	m, b, _ := newManager(t)
 	ctx := context.Background()
-	o, _ := m.Submit(ctx, risk.ApprovalForTest(t, limitIntent("c1")))
-	id := o.Intent.ClientID
+	o, _ := m.Submit(ctx, approve(t, "c1"))
+	id := orders.ClientID(o.Intent.CycleID)
 	if err := m.Cancel(ctx, id); err != nil {
 		t.Fatal(err)
 	}
@@ -356,8 +377,8 @@ func TestCancel(t *testing.T) {
 	}
 
 	b.placeErr = errors.New("timeout")
-	failed, _ := m.Submit(ctx, risk.ApprovalForTest(t, limitIntent("c2")))
-	if err := m.Cancel(ctx, failed.Intent.ClientID); !errors.Is(err, orders.ErrNotAcknowledged) {
+	failed, _ := m.Submit(ctx, approve(t, "c2"))
+	if err := m.Cancel(ctx, orders.ClientID(failed.Intent.CycleID)); !errors.Is(err, orders.ErrNotAcknowledged) {
 		t.Errorf("unacknowledged: err = %v", err)
 	}
 }
@@ -366,7 +387,7 @@ func TestReconcile(t *testing.T) {
 	j := &memJournal{}
 	b := &fakeBroker{journal: j}
 	m, _ := orders.NewManager(b, j)
-	held, lost, stray := limitIntent("held"), limitIntent("lost"), limitIntent("stray")
+	held, lost := intentOf(t, "held"), intentOf(t, "lost")
 	b.book = []domain.OrderUpdate{
 		{ClientID: orders.ClientID("held"), BrokerID: "K1", Status: domain.OrderStatusOpen, FilledQuantity: 30, AveragePrice: 1499},
 		{ClientID: orders.ClientID("stray"), BrokerID: "K2", Status: domain.OrderStatusOpen},
@@ -380,7 +401,7 @@ func TestReconcile(t *testing.T) {
 	if len(r.Adopted) != 1 || r.Adopted[0].BrokerID != "K1" || r.Adopted[0].Status != orders.StatusOpen || r.Adopted[0].FilledQuantity != 30 {
 		t.Errorf("adopted %+v", r.Adopted)
 	}
-	if len(r.NotPlaced) != 1 || r.NotPlaced[0].Intent.ClientID != orders.ClientID("lost") || r.NotPlaced[0].Status != orders.StatusNotPlaced {
+	if len(r.NotPlaced) != 1 || orders.ClientID(r.NotPlaced[0].Intent.CycleID) != orders.ClientID("lost") || r.NotPlaced[0].Status != orders.StatusNotPlaced {
 		t.Errorf("not placed %+v", r.NotPlaced)
 	}
 	if len(r.Unrecorded) != 1 || r.Unrecorded[0].BrokerID != "K2" {
@@ -390,13 +411,13 @@ func TestReconcile(t *testing.T) {
 	// Neither recorded cycle is placed again; a new cycle is.
 	ctx := context.Background()
 	for _, intent := range []domain.OrderIntent{held, lost} {
-		if _, err := m.Submit(ctx, risk.ApprovalForTest(t, intent)); !errors.Is(err, orders.ErrAlreadySubmitted) {
+		if _, err := m.Submit(ctx, approve(t, intent.CycleID)); !errors.Is(err, orders.ErrAlreadySubmitted) {
 			t.Errorf("%s: err = %v, want ErrAlreadySubmitted", intent.CycleID, err)
 		}
 	}
 	// The manager does not know an unrecorded order's cycle, which is why
 	// Reconcile reports Unrecorded for an operator to act on.
-	if _, err := m.Submit(ctx, risk.ApprovalForTest(t, stray)); err != nil {
+	if _, err := m.Submit(ctx, approve(t, "stray")); err != nil {
 		t.Fatal(err)
 	}
 	if len(b.placed) != 1 || b.placed[0].CycleID != "stray" {
@@ -404,6 +425,46 @@ func TestReconcile(t *testing.T) {
 	}
 	if open := m.Open(); len(open) != 2 {
 		t.Errorf("Open() = %+v, want held and stray", open)
+	}
+}
+
+func TestReconcileRejectsMissingCycleID(t *testing.T) {
+	j := &memJournal{}
+	m, _ := orders.NewManager(&fakeBroker{journal: j}, j)
+	recorded := intentOf(t, "c1")
+	recorded.CycleID = ""
+	if _, err := m.Reconcile(context.Background(), []domain.OrderIntent{recorded}); !errors.Is(err, orders.ErrInvalidIntent) {
+		t.Fatalf("err = %v, want ErrInvalidIntent", err)
+	}
+}
+
+func TestLateListedOrderLeavesNotPlaced(t *testing.T) {
+	j := &memJournal{}
+	b := &fakeBroker{journal: j}
+	m, _ := orders.NewManager(b, j)
+	ctx := context.Background()
+	r, err := m.Reconcile(ctx, []domain.OrderIntent{intentOf(t, "late")})
+	if err != nil || len(r.NotPlaced) != 1 {
+		t.Fatalf("reconcile %+v, err %v", r, err)
+	}
+	id := orders.ClientID("late")
+
+	got, _, err := m.Apply(domain.OrderUpdate{ClientID: id, BrokerID: "K7", Status: domain.OrderStatusOpen, FilledQuantity: 40, AveragePrice: 1500})
+	if err != nil || got.Status != orders.StatusOpen || got.BrokerID != "K7" || got.FilledQuantity != 40 {
+		t.Fatalf("order %+v, err %v", got, err)
+	}
+	if open := m.Open(); len(open) != 1 || orders.ClientID(open[0].Intent.CycleID) != id {
+		t.Errorf("Open() = %+v, want the late order", open)
+	}
+	if err := m.Cancel(ctx, id); err != nil || len(b.canceled) != 1 || b.canceled[0] != "K7" {
+		t.Fatalf("cancel: err %v, canceled %v", err, b.canceled)
+	}
+	got, _, _ = m.Apply(domain.OrderUpdate{ClientID: id, BrokerID: "K7", Status: domain.OrderStatusFilled, FilledQuantity: 100, AveragePrice: 1500})
+	if got.Status != orders.StatusFilled || len(m.Open()) != 0 {
+		t.Errorf("order %+v, want FILLED and closed", got)
+	}
+	if len(b.placed) != 0 {
+		t.Errorf("placed %v, want nothing", b.placed)
 	}
 }
 

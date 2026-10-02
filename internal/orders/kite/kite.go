@@ -120,36 +120,43 @@ func (b *Broker) Close() { b.updates.close() }
 // Updates returns the order-update stream.
 func (b *Broker) Updates() <-chan domain.OrderUpdate { return b.updates.out }
 
-// Place places a regular DAY order tagged with the intent's client id.
+// Place places a regular DAY order tagged with the intent's client id. An
+// error wraps orders.ErrNotPlaced when the request was never sent or Kite
+// rejected it as invalid input.
 func (b *Broker) Place(ctx context.Context, intent domain.OrderIntent) (string, error) {
 	if err := orders.ValidateIntent(intent); err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: %w", orders.ErrNotPlaced, err)
 	}
 	if err := b.waitOrder(ctx); err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: %w", orders.ErrNotPlaced, err)
 	}
 	resp, err := b.api.PlaceOrder(kiteconnect.VarietyRegular, b.params(intent))
+	var apiErr kiteconnect.Error
+	if errors.As(err, &apiErr) && apiErr.ErrorType == kiteconnect.InputError {
+		return "", fmt.Errorf("%w: kite: place %s: %w", orders.ErrNotPlaced, orders.ClientID(intent.CycleID), err)
+	}
 	if err != nil {
-		return "", fmt.Errorf("kite: place %s: %w", intent.ClientID, err)
+		return "", fmt.Errorf("kite: place %s: %w", orders.ClientID(intent.CycleID), err)
 	}
 	return resp.OrderID, nil
 }
 
 func (b *Broker) params(o domain.OrderIntent) kiteconnect.OrderParams {
+	spec := orders.SpecFor(o)
 	p := kiteconnect.OrderParams{
 		Exchange:        o.Instrument.Exchange,
 		Tradingsymbol:   o.Instrument.Symbol,
 		Validity:        kiteconnect.ValidityDay,
 		Product:         b.product,
-		OrderType:       string(o.Type),
+		OrderType:       string(spec.Type),
 		TransactionType: string(o.Side),
 		Quantity:        int(o.Quantity),
-		Tag:             o.ClientID,
+		Tag:             orders.ClientID(o.CycleID),
 	}
-	if o.Type == domain.OrderTypeLimit {
-		p.Price = o.LimitPrice
+	if spec.Type == domain.OrderTypeLimit {
+		p.Price = spec.LimitPrice
 	} else {
-		p.MarketProtection = o.MarketProtection
+		p.MarketProtection = spec.MarketProtection
 	}
 	return p
 }

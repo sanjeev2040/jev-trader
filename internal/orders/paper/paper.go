@@ -1,7 +1,7 @@
 // Package paper is the simulated broker used for paper trading and backtests.
 // It fills orders against the market-data stream at the first event after
-// order time, with configurable slippage and costs, and emits the same order
-// updates as the Kite broker.
+// order time plus the configured latency, with configurable slippage and
+// costs, and emits the same order updates as the Kite broker.
 //
 // Updates are sent synchronously by the call that causes them (Place, Cancel,
 // OnTick, OnBar) and never block: Place refuses a new order unless the update
@@ -42,6 +42,10 @@ type Config struct {
 	// UpdateBuffer is the capacity of the Updates channel. Zero means
 	// DefaultUpdateBuffer.
 	UpdateBuffer int
+	// Latency delays when an order can fill: an order placed at the clock's
+	// Now fills only on a tick after Now+Latency or a bar that starts at or
+	// after it. Zero means the first event after Now.
+	Latency time.Duration
 }
 
 // Defaults.
@@ -65,10 +69,12 @@ var (
 )
 
 type order struct {
-	intent   domain.OrderIntent
-	brokerID string
-	placedAt time.Time
-	last     domain.OrderUpdate
+	intent    domain.OrderIntent
+	spec      orders.Spec
+	clientID  string
+	brokerID  string
+	fillsFrom time.Time // order time plus latency
+	last      domain.OrderUpdate
 }
 
 // Broker is the paper broker. It is safe for concurrent use.
@@ -95,7 +101,7 @@ func New(clock Clock, cfg Config) (*Broker, error) {
 	if clock == nil {
 		return nil, errors.New("paper: New needs a clock")
 	}
-	if cfg.SlippageBps < 0 || cfg.TickSize < 0 || cfg.UpdateBuffer < 0 {
+	if cfg.SlippageBps < 0 || cfg.TickSize < 0 || cfg.UpdateBuffer < 0 || cfg.Latency < 0 {
 		return nil, fmt.Errorf("paper: negative config value: %+v", cfg)
 	}
 	if cfg.TickSize == 0 {
@@ -117,8 +123,16 @@ func New(clock Clock, cfg Config) (*Broker, error) {
 func (b *Broker) Updates() <-chan domain.OrderUpdate { return b.updates }
 
 // Place accepts an order and acknowledges it with an OPEN update. It fills on
-// a later OnTick or OnBar.
+// a later OnTick or OnBar. Every error wraps orders.ErrNotPlaced.
 func (b *Broker) Place(ctx context.Context, intent domain.OrderIntent) (string, error) {
+	brokerID, err := b.place(ctx, intent)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", orders.ErrNotPlaced, err)
+	}
+	return brokerID, nil
+}
+
+func (b *Broker) place(ctx context.Context, intent domain.OrderIntent) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -127,8 +141,8 @@ func (b *Broker) Place(ctx context.Context, intent domain.OrderIntent) (string, 
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if _, ok := b.byTag[intent.ClientID]; ok {
-		return "", fmt.Errorf("%w: %s", ErrDuplicateTag, intent.ClientID)
+	if _, ok := b.byTag[orders.ClientID(intent.CycleID)]; ok {
+		return "", fmt.Errorf("%w: %s", ErrDuplicateTag, orders.ClientID(intent.CycleID))
 	}
 	// The ack takes one slot now, and every open order, this one included,
 	// can still produce one terminal update.
@@ -136,16 +150,19 @@ func (b *Broker) Place(ctx context.Context, intent domain.OrderIntent) (string, 
 		return "", ErrUpdateBacklog
 	}
 	b.seq++
+	now := b.clock.Now()
 	o := &order{
-		intent:   intent,
-		brokerID: fmt.Sprintf("paper-%d", b.seq),
-		placedAt: b.clock.Now(),
+		intent:    intent,
+		spec:      orders.SpecFor(intent),
+		clientID:  orders.ClientID(intent.CycleID),
+		brokerID:  fmt.Sprintf("paper-%d", b.seq),
+		fillsFrom: now.Add(b.cfg.Latency),
 	}
 	b.orders[o.brokerID] = o
-	b.byTag[intent.ClientID] = o.brokerID
+	b.byTag[o.clientID] = o.brokerID
 	b.all = append(b.all, o)
 	b.open = append(b.open, o)
-	b.emit(o, domain.OrderUpdate{Status: domain.OrderStatusOpen, Time: o.placedAt})
+	b.emit(o, domain.OrderUpdate{Status: domain.OrderStatusOpen, Time: now})
 	return o.brokerID, nil
 }
 
@@ -184,34 +201,34 @@ func (b *Broker) Orders(ctx context.Context) ([]domain.OrderUpdate, error) {
 
 // OnTick offers a tick to the open orders on its instrument. An order fills
 // at the tick's last price when the tick's exchange time (or receive time, if
-// that is unset) is after the order time.
+// that is unset) is after the order time plus latency.
 func (b *Broker) OnTick(t domain.Tick) {
 	at := t.ExchangeTime
 	if at.IsZero() {
 		at = t.ReceivedAt
 	}
-	b.offer(t.Token, at, func(placedAt time.Time) bool { return at.After(placedAt) },
+	b.offer(t.Token, at, func(fillsFrom time.Time) bool { return at.After(fillsFrom) },
 		t.LastPrice, t.LastPrice, t.LastPrice)
 }
 
 // OnBar offers a closed bar to the open orders on its instrument. Only a bar
-// that starts at or after the order time is used, so no price from before the
-// order can fill it. A market order fills at the bar's open; a limit order
+// that starts at or after the order time plus latency is used, so no price
+// from before the order can fill it. A market order fills at the bar's open; a limit order
 // fills at the open if that is within the limit, else at the limit if the
 // bar's range reached it.
 func (b *Broker) OnBar(bar domain.Bar) {
-	b.offer(bar.Instrument.Token, bar.End, func(placedAt time.Time) bool { return !bar.Start.Before(placedAt) },
+	b.offer(bar.Instrument.Token, bar.End, func(fillsFrom time.Time) bool { return !bar.Start.Before(fillsFrom) },
 		bar.Open, bar.Low, bar.High)
 }
 
-func (b *Broker) offer(token uint32, at time.Time, after func(placedAt time.Time) bool, first, low, high float64) {
+func (b *Broker) offer(token uint32, at time.Time, after func(fillsFrom time.Time) bool, first, low, high float64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for _, o := range slices.Clone(b.open) {
-		if o.intent.Instrument.Token != token || !after(o.placedAt) {
+		if o.intent.Instrument.Token != token || !after(o.fillsFrom) {
 			continue
 		}
-		price, ok := b.fillPrice(o.intent, first, low, high)
+		price, ok := b.fillPrice(o, first, low, high)
 		if !ok {
 			continue
 		}
@@ -229,31 +246,31 @@ func (b *Broker) offer(token uint32, at time.Time, after func(placedAt time.Time
 
 // fillPrice returns the price an order fills at, given the first price after
 // order time and the range that follows it, or false if it does not fill.
-func (b *Broker) fillPrice(o domain.OrderIntent, first, low, high float64) (float64, bool) {
+func (b *Broker) fillPrice(o *order, first, low, high float64) (float64, bool) {
 	if !(first > 0) {
 		return 0, false
 	}
 	slip := b.cfg.SlippageBps / 10_000
-	if o.Side == domain.ActionBuy {
+	if o.intent.Side == domain.ActionBuy {
 		px := roundUp(first*(1+slip), b.cfg.TickSize)
 		switch {
-		case o.Type == domain.OrderTypeMarket:
+		case o.spec.Type == domain.OrderTypeMarket:
 			return px, true
-		case first <= o.LimitPrice:
-			return min(px, o.LimitPrice), true
-		case low <= o.LimitPrice:
-			return o.LimitPrice, true
+		case first <= o.spec.LimitPrice:
+			return min(px, o.spec.LimitPrice), true
+		case low <= o.spec.LimitPrice:
+			return o.spec.LimitPrice, true
 		}
 		return 0, false
 	}
 	px := roundDown(first*(1-slip), b.cfg.TickSize)
 	switch {
-	case o.Type == domain.OrderTypeMarket:
+	case o.spec.Type == domain.OrderTypeMarket:
 		return px, true
-	case first >= o.LimitPrice:
-		return max(px, o.LimitPrice), true
-	case high >= o.LimitPrice:
-		return o.LimitPrice, true
+	case first >= o.spec.LimitPrice:
+		return max(px, o.spec.LimitPrice), true
+	case high >= o.spec.LimitPrice:
+		return o.spec.LimitPrice, true
 	}
 	return 0, false
 }
@@ -261,7 +278,7 @@ func (b *Broker) fillPrice(o domain.OrderIntent, first, low, high float64) (floa
 // emit records u as o's latest state and sends it. Place's buffer check
 // guarantees the send does not block.
 func (b *Broker) emit(o *order, u domain.OrderUpdate) {
-	u.ClientID = o.intent.ClientID
+	u.ClientID = o.clientID
 	u.BrokerID = o.brokerID
 	o.last = u
 	b.updates <- u
