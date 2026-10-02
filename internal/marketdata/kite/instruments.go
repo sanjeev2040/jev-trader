@@ -19,8 +19,7 @@ import (
 // DefaultAPIURL is the Kite Connect REST root.
 const DefaultAPIURL = "https://api.kite.trade"
 
-// ist is the exchange's time zone. The instrument master is regenerated once
-// per IST trading day.
+// ist is the exchange's time zone.
 var ist = time.FixedZone("IST", 5*3600+1800)
 
 // ParseInstruments parses a Kite instrument master CSV dump. Columns are
@@ -74,13 +73,16 @@ func ParseInstruments(r io.Reader) ([]domain.Instrument, error) {
 // instrumentKey returns the instrument's watchlist key, "EXCHANGE:SYMBOL".
 func instrumentKey(in domain.Instrument) string { return in.Exchange + ":" + in.Symbol }
 
-// Resolve maps watchlist entries to instruments. An entry is
-// "EXCHANGE:SYMBOL"; a bare symbol means NSE. Matching is case-insensitive.
-// It fails listing every entry it cannot find.
+// Resolve maps watchlist entries to instruments. An entry must be exactly an
+// instrument's "EXCHANGE:SYMBOL" key. It fails listing every entry that is
+// malformed or not in the master.
 func Resolve(master []domain.Instrument, watchlist []string) ([]domain.Instrument, error) {
+	if err := checkEntries(watchlist); err != nil {
+		return nil, err
+	}
 	byKey := make(map[string]domain.Instrument, len(master))
 	for _, in := range master {
-		byKey[strings.ToUpper(instrumentKey(in))] = in
+		byKey[instrumentKey(in)] = in
 	}
 	var (
 		out     []domain.Instrument
@@ -88,14 +90,7 @@ func Resolve(master []domain.Instrument, watchlist []string) ([]domain.Instrumen
 		seen    = map[uint32]bool{}
 	)
 	for _, entry := range watchlist {
-		key := strings.ToUpper(strings.TrimSpace(entry))
-		if key == "" {
-			continue
-		}
-		if !strings.Contains(key, ":") {
-			key = "NSE:" + key
-		}
-		in, ok := byKey[key]
+		in, ok := byKey[entry]
 		if !ok {
 			missing = append(missing, entry)
 			continue
@@ -150,12 +145,18 @@ func HTTPMasterFetcher(client *http.Client, baseURL, apiKey string, tokens Token
 	}
 }
 
+// masterCutover is how long after IST midnight Kite regenerates the
+// instrument master.
+const masterCutover = 8*time.Hour + 30*time.Minute
+
 // LoadMaster returns the instrument master for the given exchanges, loading
-// it at most once per IST day. Each exchange's dump is cached as
-// cacheDir/instruments/date=YYYY-MM-DD/EXCHANGE.csv; a cached file for the
-// day of now is reused instead of fetching again.
+// it at most once per master day. A master day starts at the ~08:30 IST
+// regeneration, so before then the previous day's dump is still current. Each
+// exchange's dump is cached as cacheDir/instruments/date=YYYY-MM-DD/EXCHANGE.csv;
+// a cached file for the master day of now is reused instead of fetching again.
 func LoadMaster(ctx context.Context, cacheDir string, now time.Time, exchanges []string, fetch MasterFetcher) ([]domain.Instrument, error) {
-	dir := filepath.Join(cacheDir, "instruments", "date="+now.In(ist).Format(time.DateOnly))
+	day := now.In(ist).Add(-masterCutover).Format(time.DateOnly)
+	dir := filepath.Join(cacheDir, "instruments", "date="+day)
 	var all []domain.Instrument
 	for _, ex := range exchanges {
 		path := filepath.Join(dir, ex+".csv")
@@ -207,23 +208,35 @@ func downloadMaster(ctx context.Context, path, exchange string, fetch MasterFetc
 }
 
 // Exchanges returns the distinct exchanges named by watchlist entries, in
-// first-seen order. A bare symbol counts as NSE.
-func Exchanges(watchlist []string) []string {
+// first-seen order. Every entry must be in "EXCHANGE:SYMBOL" form.
+func Exchanges(watchlist []string) ([]string, error) {
+	if err := checkEntries(watchlist); err != nil {
+		return nil, err
+	}
 	var out []string
 	seen := map[string]bool{}
 	for _, entry := range watchlist {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
-		}
-		ex := "NSE"
-		if i := strings.Index(entry, ":"); i >= 0 {
-			ex = strings.ToUpper(entry[:i])
-		}
+		ex, _, _ := strings.Cut(entry, ":")
 		if !seen[ex] {
 			seen[ex] = true
 			out = append(out, ex)
 		}
 	}
-	return out
+	return out, nil
+}
+
+// checkEntries fails naming every watchlist entry not in "EXCHANGE:SYMBOL"
+// form.
+func checkEntries(watchlist []string) error {
+	var bad []string
+	for _, entry := range watchlist {
+		ex, sym, ok := strings.Cut(entry, ":")
+		if !ok || ex == "" || sym == "" {
+			bad = append(bad, fmt.Sprintf("%q", entry))
+		}
+	}
+	if len(bad) > 0 {
+		return fmt.Errorf("watchlist entries not in EXCHANGE:SYMBOL form: %s", strings.Join(bad, ", "))
+	}
+	return nil
 }

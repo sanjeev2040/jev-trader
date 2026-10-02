@@ -44,10 +44,6 @@ type Config struct {
 	Tokens      TokenProvider
 	Instruments []domain.Instrument // subscribed in full mode
 
-	// MaxReconnectAttempts caps consecutive reconnect attempts. Zero keeps
-	// the vendor default (300). Backoff is exponential, capped at 60 s.
-	MaxReconnectAttempts int
-
 	// URL overrides the ticker WebSocket URL; for tests.
 	URL *url.URL
 	// Now returns the local receive time; defaults to time.Now.
@@ -119,9 +115,6 @@ func New(cfg Config) (*Source, error) {
 		t := kiteticker.New(apiKey, accessToken)
 		if cfg.URL != nil {
 			t.SetRootURL(*cfg.URL)
-		}
-		if cfg.MaxReconnectAttempts > 0 {
-			t.SetReconnectMaxRetries(cfg.MaxReconnectAttempts)
 		}
 		return t
 	}

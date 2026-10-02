@@ -33,11 +33,9 @@ func (envAccessToken) Token(context.Context) (string, error) {
 func record(args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("record", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	watchlist := fs.String("watchlist", "", `comma-separated instruments, e.g. "NSE:INFY,NSE:TCS,NSE:NIFTY 50" (a bare symbol means NSE)`)
+	watchlist := fs.String("watchlist", "", `comma-separated instruments, e.g. "NSE:INFY,NSE:TCS,NSE:NIFTY 50" (exact EXCHANGE:SYMBOL keys)`)
 	dataDir := fs.String("data-dir", "data", "directory for ticks and the cached instrument master")
 	buffer := fs.Int("buffer", 8192, "tick channel capacity; ticks are dropped when it is full")
-	rotation := fs.Duration("rotation", store.DefaultRotation, "how long each tick file stays open")
-	maxReconnects := fs.Int("max-reconnects", 0, "consecutive reconnect attempts before giving up (0: ticker default)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -64,13 +62,11 @@ func record(args []string, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := recordTicks(ctx, log, recordConfig{
-		apiKey:        apiKey,
-		tokens:        envAccessToken{},
-		watchlist:     symbols,
-		dataDir:       *dataDir,
-		buffer:        *buffer,
-		rotation:      *rotation,
-		maxReconnects: *maxReconnects,
+		apiKey:    apiKey,
+		tokens:    envAccessToken{},
+		watchlist: symbols,
+		dataDir:   *dataDir,
+		buffer:    *buffer,
 	}); err != nil {
 		log.Error("record failed", "err", err)
 		return 1
@@ -79,17 +75,19 @@ func record(args []string, stderr io.Writer) int {
 }
 
 type recordConfig struct {
-	apiKey        string
-	tokens        kite.TokenProvider
-	watchlist     []string
-	dataDir       string
-	buffer        int
-	rotation      time.Duration
-	maxReconnects int
+	apiKey    string
+	tokens    kite.TokenProvider
+	watchlist []string
+	dataDir   string
+	buffer    int
 }
 
 func recordTicks(ctx context.Context, log *slog.Logger, cfg recordConfig) error {
-	master, err := kite.LoadMaster(ctx, cfg.dataDir, time.Now(), kite.Exchanges(cfg.watchlist),
+	exchanges, err := kite.Exchanges(cfg.watchlist)
+	if err != nil {
+		return err
+	}
+	master, err := kite.LoadMaster(ctx, cfg.dataDir, time.Now(), exchanges,
 		kite.HTTPMasterFetcher(nil, "", cfg.apiKey, cfg.tokens))
 	if err != nil {
 		return err
@@ -99,11 +97,10 @@ func recordTicks(ctx context.Context, log *slog.Logger, cfg recordConfig) error 
 		return err
 	}
 	src, err := kite.New(kite.Config{
-		APIKey:               cfg.apiKey,
-		Tokens:               cfg.tokens,
-		Instruments:          instruments,
-		MaxReconnectAttempts: cfg.maxReconnects,
-		Logger:               log,
+		APIKey:      cfg.apiKey,
+		Tokens:      cfg.tokens,
+		Instruments: instruments,
+		Logger:      log,
 	})
 	if err != nil {
 		return err
@@ -121,7 +118,7 @@ func recordTicks(ctx context.Context, log *slog.Logger, cfg recordConfig) error 
 	defer rotate.Stop()
 	recDone := make(chan error, 1)
 	go func() {
-		err := store.RecordTicks(recCtx, ticks, store.NewTickWriter(cfg.dataDir, cfg.rotation), rotate.C)
+		err := store.RecordTicks(recCtx, ticks, store.NewTickWriter(cfg.dataDir, store.DefaultRotation), rotate.C)
 		if err != nil {
 			cancel(err)
 		}
