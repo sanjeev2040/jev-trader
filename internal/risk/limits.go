@@ -46,7 +46,6 @@ type Limits struct {
 
 	MaxPositionNotional float64 // per-instrument cap on |quantity| × price
 	MaxGrossNotional    float64 // cap on the sum over all instruments, including orders in flight
-	MaxOpenPositions    int     // cap on instruments with an open position or entry in flight
 
 	// MaxDailyLoss halts new entries and flattens the book once the day's
 	// realized plus unrealized PnL reaches -MaxDailyLoss.
@@ -83,7 +82,6 @@ func DefaultLimits() Limits {
 		},
 		MaxPositionNotional:      50_000,
 		MaxGrossNotional:         200_000,
-		MaxOpenPositions:         5,
 		MaxDailyLoss:             5_000,
 		MaxOrdersPerSecond:       3,
 		MaxOrdersPerMinute:       60,
@@ -128,9 +126,6 @@ func (l Limits) Validate() error {
 	positive("max daily loss", l.MaxDailyLoss)
 	if l.MaxGrossNotional < l.MaxPositionNotional {
 		bad("max gross notional %v is below max position notional %v", l.MaxGrossNotional, l.MaxPositionNotional)
-	}
-	if l.MaxOpenPositions < 1 {
-		bad("max open positions must be at least 1, got %d", l.MaxOpenPositions)
 	}
 	if l.MaxOrdersPerSecond < 1 || l.MaxOrdersPerSecond >= kiteOrdersPerSecond {
 		bad("max orders per second must be in [1, %d), got %d", kiteOrdersPerSecond, l.MaxOrdersPerSecond)

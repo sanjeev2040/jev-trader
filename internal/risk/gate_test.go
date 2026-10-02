@@ -61,7 +61,6 @@ func TestNewGateRejectsInvalidLimits(t *testing.T) {
 		"NaN size notional":        func(l *Limits) { l.SizeNotional[domain.SizeS] = math.NaN() },
 		"zero position cap":        func(l *Limits) { l.MaxPositionNotional = 0 },
 		"gross below position cap": func(l *Limits) { l.MaxGrossNotional = l.MaxPositionNotional - 1 },
-		"zero open positions":      func(l *Limits) { l.MaxOpenPositions = 0 },
 		"zero daily loss":          func(l *Limits) { l.MaxDailyLoss = 0 },
 		"per second at Kite limit": func(l *Limits) { l.MaxOrdersPerSecond = 10 },
 		"per minute at Kite limit": func(l *Limits) { l.MaxOrdersPerMinute = 400 },
@@ -166,15 +165,6 @@ func TestEvaluateRefusals(t *testing.T) {
 			name:  "size too small",
 			setup: func(_ *Gate, b *Book) { b.Mark(1, 20_000) },
 			d:     decision(domain.ActionBuy, domain.SizeS, 0.9), want: ReasonSizeTooSmall,
-		},
-		{
-			name: "max open positions",
-			setup: func(_ *Gate, b *Book) {
-				for tok := uint32(10); tok < 15; tok++ {
-					long(b, tok, 1, 100, 100)
-				}
-			},
-			d: buyM, want: ReasonMaxPositions,
 		},
 		{
 			name:  "position cap",

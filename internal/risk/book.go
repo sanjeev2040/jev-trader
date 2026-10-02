@@ -224,17 +224,6 @@ func (b *Book) grossExposure() float64 {
 	return g
 }
 
-// openCount counts instruments with an open position or an entry in flight.
-func (b *Book) openCount() int {
-	n := len(b.positions)
-	for token, in := range b.inflight {
-		if _, ok := b.positions[token]; !ok && !in.ReduceOnly {
-			n++
-		}
-	}
-	return n
-}
-
 // price returns the last mark, falling back to the position's average price.
 func (b *Book) price(token uint32) float64 {
 	if m, ok := b.marks[token]; ok {

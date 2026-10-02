@@ -29,7 +29,6 @@ const (
 	ReasonShortNotAllowed  Reason = "short_not_allowed"
 	ReasonNoPrice          Reason = "no_price"
 	ReasonSizeTooSmall     Reason = "size_too_small"
-	ReasonMaxPositions     Reason = "max_open_positions"
 	ReasonPositionCap      Reason = "position_cap"
 	ReasonGrossCap         Reason = "gross_cap"
 	ReasonOrderRate        Reason = "order_rate_limit"
@@ -180,9 +179,6 @@ func (g *Gate) Evaluate(req Request, b *Book, now time.Time) Verdict {
 		qty = int64(math.Floor(notional / price))
 		if qty < 1 {
 			return refuse(ReasonSizeTooSmall, "size %s (%.2f) buys no shares at %.2f", d.Size, notional, price)
-		}
-		if pos == 0 && b.openCount() >= l.MaxOpenPositions {
-			return refuse(ReasonMaxPositions, "%d positions open, limit %d", b.openCount(), l.MaxOpenPositions)
 		}
 		if n := float64(abs(pos)+qty) * price; n > l.MaxPositionNotional {
 			return refuse(ReasonPositionCap, "position notional %.2f over cap %.2f", n, l.MaxPositionNotional)
