@@ -40,21 +40,22 @@ func (q Query) match(token uint32, ts time.Time) bool {
 	return len(q.Tokens) == 0 || slices.Contains(q.Tokens, token)
 }
 
-// ScanTicks calls fn for every stored tick matching q, in exchange-time order.
-// Ticks with equal exchange times keep the order they were recorded in. It
+// ScanTicks calls fn for every stored tick matching q, in the order the ticks
+// were recorded, so replay feeds bars.Builder exactly what the live run saw. It
 // stops at the first error fn returns and returns it.
 func ScanTicks(root string, q Query, fn func(domain.Tick) error) error {
-	// A tick is filed under its own exchange time, so the date range is exact.
-	return scan(root, KindTicks, TickSchemaVersion, q.From, q.To, func(rows []tickRow) error {
-		ticks := make([]domain.Tick, 0, len(rows))
+	// A tick is filed under its receive time, which follows its exchange time,
+	// so a tick inside the query can be filed up to a day after its upper bound.
+	to := q.To
+	if !to.IsZero() {
+		to = to.Add(24 * time.Hour)
+	}
+	return scan(root, KindTicks, TickSchemaVersion, q.From, to, func(rows []tickRow) error {
 		for _, r := range rows {
 			t := rowToTick(r)
-			if q.match(t.InstrumentToken, t.ExchangeTime) {
-				ticks = append(ticks, t)
+			if !q.match(t.InstrumentToken, t.ExchangeTime) {
+				continue
 			}
-		}
-		slices.SortStableFunc(ticks, func(a, b domain.Tick) int { return a.ExchangeTime.Compare(b.ExchangeTime) })
-		for _, t := range ticks {
 			if err := fn(t); err != nil {
 				return err
 			}

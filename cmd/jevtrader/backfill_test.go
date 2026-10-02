@@ -198,6 +198,9 @@ func TestParseBackfill(t *testing.T) {
 		{"1", "2026-09-01", "", "90s"},
 		{"1", "2026-09-01", "", "1m"},
 		{"1", "2026-09-01", "", "x"},
+		{"1", "2026-09-01", "", "7m"},
+		{"1", "2026-09-01", "", "45m"},
+		{"1", "2026-09-01", "", "5m,5m"},
 	}
 	for _, tc := range bad {
 		if _, err := parseBackfill(tc.tokens, tc.from, tc.to, tc.derive, "data"); err == nil {

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"flag"
@@ -126,10 +125,10 @@ func parseBackfill(tokens, from, to, derived, dataDir string) (backfillJob, erro
 		if err != nil {
 			return job, fmt.Errorf("--derive: %w", err)
 		}
-		if d <= time.Minute || d%time.Minute != 0 {
-			return job, fmt.Errorf("--derive: %v is not a multiple of 1m above 1m", d)
-		}
 		job.derived = append(job.derived, d)
+	}
+	if _, err := bars.New(bars.Config{Base: time.Minute, Derived: job.derived}); err != nil {
+		return job, fmt.Errorf("--derive: %w", err)
 	}
 	job.dataDir = dataDir
 	return job, nil
@@ -218,15 +217,7 @@ func (job backfillJob) fetchChunk(ctx context.Context, kite historian, limiter *
 			out = append(out, agg...)
 		}
 	}
-	slices.SortStableFunc(out, func(a, b domain.Bar) int {
-		if c := a.Start.Add(a.Interval).Compare(b.Start.Add(b.Interval)); c != 0 {
-			return c
-		}
-		if c := cmp.Compare(a.Interval, b.Interval); c != 0 {
-			return c
-		}
-		return cmp.Compare(a.InstrumentToken, b.InstrumentToken)
-	})
+	bars.Sort(out)
 	return out, nil
 }
 

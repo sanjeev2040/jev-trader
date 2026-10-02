@@ -152,7 +152,7 @@ func (b *Builder) Add(t domain.Tick) []domain.Bar {
 	bar.Volume += st.volumeDelta(t)
 	bar.Ticks++
 
-	sortBars(out)
+	Sort(out)
 	return out
 }
 
@@ -166,7 +166,7 @@ func (b *Builder) Advance(now time.Time) []domain.Bar {
 	for _, st := range b.inst {
 		b.closeUpTo(st, cutoff, &out)
 	}
-	sortBars(out)
+	Sort(out)
 	return out
 }
 
@@ -221,17 +221,17 @@ func (b *Builder) feedDerived(st *instrument, bar domain.Bar, out *[]domain.Bar)
 // derived from the cumulative day volume rather than from tick quantities.
 //
 // The first observation of an instrument only sets the baseline. A lower
-// cumulative volume on a later IST date is a new day, so the whole value
-// counts; a lower value on the same date is stale data and counts nothing.
+// observation on a later IST date is a new day, so the whole value counts; a
+// lower value on the same date is stale data and counts nothing.
 func (st *instrument) volumeDelta(t domain.Tick) uint64 {
 	day := t.ExchangeTime.In(ist).Format(time.DateOnly)
 	var delta uint64
 	switch {
 	case !st.haveVolume:
-	case t.VolumeTraded >= st.volume:
-		delta = t.VolumeTraded - st.volume
 	case day > st.volumeDay:
 		delta = t.VolumeTraded
+	case t.VolumeTraded >= st.volume:
+		delta = t.VolumeTraded - st.volume
 	default:
 		return 0 // stale; keep the higher baseline
 	}
@@ -285,7 +285,7 @@ func Aggregate(in []domain.Bar, interval time.Duration) ([]domain.Bar, error) {
 		merge(&agg, bar)
 		out = append(out, agg)
 	}
-	sortBars(out)
+	Sort(out)
 	return out, nil
 }
 
@@ -300,9 +300,9 @@ func merge(agg *domain.Bar, bar domain.Bar) {
 
 func end(bar domain.Bar) time.Time { return bar.Start.Add(bar.Interval) }
 
-// sortBars orders bars by end time, then interval, then instrument token, so
-// output is deterministic regardless of map iteration order.
-func sortBars(bars []domain.Bar) {
+// Sort orders bars by end time, then interval, then instrument token: the
+// order Builder emits, deterministic regardless of map iteration order.
+func Sort(bars []domain.Bar) {
 	slices.SortFunc(bars, func(a, b domain.Bar) int {
 		if c := end(a).Compare(end(b)); c != 0 {
 			return c

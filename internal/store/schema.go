@@ -5,7 +5,8 @@
 //	<root>/<kind>/date=YYYY-MM-DD/<kind>-HHMM-NNN.parquet
 //
 // The date and HHMM are the IST date and the start of the 15-minute window the
-// rows fall in. NNN distinguishes files of one window written by different
+// rows fall in: a tick by its receive time, so files hold ticks in the order
+// they arrived, and a bar by its end. NNN distinguishes files of one window written by different
 // runs. A file is written under a hidden temporary name and renamed when it is
 // closed, so readers never see a partial file and a crash loses at most the
 // file that was open.

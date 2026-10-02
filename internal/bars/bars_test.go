@@ -196,6 +196,9 @@ func TestVolume(t *testing.T) {
 		{"reset on a new day counts the whole value", []domain.Tick{
 			tick(1, prev.Add(6*time.Hour), 10, 900000), tick(1, at(9, 15, 1), 10, 1200),
 		}, 1200},
+		{"higher value on a new day counts the whole value", []domain.Tick{
+			tick(1, prev.Add(6*time.Hour), 10, 400000), tick(1, at(9, 15, 1), 10, 450000),
+		}, 450000},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
