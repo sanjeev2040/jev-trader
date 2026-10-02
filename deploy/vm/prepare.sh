@@ -3,7 +3,7 @@
 #   1. reads this VM's jev-image tag from the instance metadata service,
 #   2. logs in to ACR with the VM's managed identity and pulls that image,
 #   3. fetches the secrets from Key Vault into a 0600 file on tmpfs.
-# Nothing here is stored on disk except the last good image tag.
+# Only the most recent image is kept; there is no fallback to an older one.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 load_conf
@@ -11,8 +11,8 @@ umask 077
 
 # 1. Which image? The deploy workflow sets the VM tag jev-image=<12-char sha>.
 # A tag changed while the VM was deallocated is visible here at the next start.
-# The value is always logged; if IMDS is slow or the tag is missing, the last
-# good image is the fallback.
+# The value is always logged. A missing or invalid tag stops the boot with a
+# clear error (the retry covers a slow metadata service).
 read_tag() {
   local value
   value=$(imds 'instance/compute/tagsList?api-version=2021-02-01&format=json' |
@@ -20,18 +20,8 @@ read_tag() {
   [ -n "$value" ] && printf '%s\n' "$value"
 }
 tag=$(retry 6 10 read_tag || true)
-if [[ ! "$tag" =~ ^[0-9a-f]{12}$ ]]; then
-  log "VM tag jev-image is '${tag}', not a 12-character sha"
-  tag=""
-fi
-last_good_file="$STATE_ROOT/last-good-image"
-last_good=""
-[ -r "$last_good_file" ] && last_good=$(cat "$last_good_file")
-if [ -z "$tag" ]; then
-  [ -n "$last_good" ] || die "no valid jev-image tag and no previous image: merge to main (or run the Release workflow) so the tag is set"
-  log "falling back to the last good image $last_good"
-  tag=$last_good
-fi
+[[ "$tag" =~ ^[0-9a-f]{12}$ ]] ||
+  die "VM tag jev-image is '${tag}', not a 12-character sha: merge to main (or run the Release workflow) so the tag is set"
 log "VM tag jev-image=$tag"
 
 # 2. Pull from ACR with the managed identity (the VM holds AcrPull).
@@ -45,14 +35,7 @@ acr_login() {
 }
 retry 5 10 acr_login || die "cannot log in to $ACR_LOGIN_SERVER"
 image="$ACR_LOGIN_SERVER/jevtrader:$tag"
-if ! retry 3 10 docker pull --quiet "$image" > /dev/null; then
-  [ -n "$last_good" ] && [ "$tag" != "$last_good" ] || die "cannot pull $image"
-  log "cannot pull $image; falling back to $last_good"
-  tag=$last_good
-  image="$ACR_LOGIN_SERVER/jevtrader:$tag"
-  retry 3 10 docker pull --quiet "$image" > /dev/null || die "cannot pull $image"
-fi
-printf '%s\n' "$tag" > "$last_good_file"
+retry 3 10 docker pull --quiet "$image" > /dev/null || die "cannot pull $image"
 printf '%s\n' "$image" > "$RUN_DIR/image"
 log "image $image is ready"
 docker image ls --format '{{.Repository}}:{{.Tag}}' "$ACR_LOGIN_SERVER/jevtrader" |

@@ -169,7 +169,7 @@ In the [Kite developer console](https://developers.kite.trade/), confirm the app
 
    `jevtrader-prepare` logs the tag it read (`VM tag jev-image=...`), pulls the image and loads the secrets. `jevtrader-run` then waits for your login.
 
-3. Check the instance metadata service shows the tag. Whether tag changes reach it promptly was not verified when this was written, so confirm it on the first release: on the VM, `curl -s -H Metadata:true --noproxy '*' 'http://169.254.169.254/metadata/instance/compute/tagsList?api-version=2021-02-01&format=json'`. If it lags, the VM falls back to the last good image and logs it; wait a few minutes and run `sudo systemctl restart jevtrader-prepare`.
+3. Check the instance metadata service shows the tag. Whether tag changes reach it promptly was not verified when this was written, so confirm it on the first release: on the VM, `curl -s -H Metadata:true --noproxy '*' 'http://169.254.169.254/metadata/instance/compute/tagsList?api-version=2021-02-01&format=json'`. If the tag is missing, `jevtrader-prepare` fails and retries every 30 seconds; if the service shows an older value than the workflow set, wait a few minutes and run `sudo systemctl restart jevtrader-prepare jevtrader-run`. The VM keeps only the most recent image, so a rollback pulls the older one from ACR again.
 
 4. Log in (the runbook below). Trading starts by itself once a valid session exists.
 
