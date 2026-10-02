@@ -90,7 +90,7 @@ The module is `github.com/sanjeev2040/jev-trader`. Everything except `cmd/` live
 | Package | Responsibility |
 | --- | --- |
 | `cmd/jevtrader` | CLI entry point and subcommands. Wires config into the engine. |
-| `internal/domain` | Small shared value types: `Instrument`, `Tick`, `Bar`, `Action`, `Decision`, `OrderIntent`, `OrderUpdate`, `Fill`, `Position`. No logic and no imports beyond the standard library. |
+| `internal/domain` | Small shared value types: `Instrument`, `Tick`, `Bar`, `Action`, `Decision`, `DecideError`, `OrderIntent`, `OrderUpdate`, `Fill`, `Position`. No logic and no imports beyond the standard library. |
 | `internal/config` | Loads non-secret YAML config and secrets from the environment. Validates both. |
 | `internal/clock` | `Clock` interface (`Now`, `After`), with a wall clock and a simulated clock. Session calendar in Asia/Kolkata. |
 | `internal/kiteauth` | Login flow, token exchange, the token store and the expiry check (#3). |
@@ -158,7 +158,7 @@ There is no external message bus. Components talk over Go channels inside one pr
 4. **Snapshot and decide.** On a bar close (default: 1m) for an instrument with no decision in flight, the engine builds a `snapshot.Snapshot` and encodes it to JSON. It then starts one goroutine that calls `Decider.Decide` with a per-call deadline (default 800 ms, configurable). A semaphore caps concurrent Jev calls (default 8). The result returns to the engine on a results channel.
 5. **Risk.** The engine passes each `Decision` to `risk.Gate.Evaluate` with the current book and the time. The gate returns a verdict. If an order is warranted, the verdict carries a `risk.Approval`.
 6. **Orders.** The engine passes approvals to `orders.Manager.Submit`. Broker `Updates()` flow back into the engine loop and update positions. Positions feed the risk book and the next snapshot.
-7. **Log.** The engine writes one decision record per cycle synchronously, *before* it submits any order: the snapshot, the raw Jev answer, latency, verdict and intent. A crash after the write can then be reconciled; a crash before it leaves nothing to reconcile. SQLite WAL inserts take about a millisecond, far inside a 1-minute bar.
+7. **Log.** The engine writes one cycle record per decision cycle or risk-driven exit synchronously, *before* it submits any order: the snapshot, the raw Jev answer (or the exit reason), latency, verdict and intent. A crash after the write can then be reconciled; a crash before it leaves nothing to reconcile. SQLite WAL inserts take about a millisecond, far inside a 1-minute bar.
 
 **Replay difference.** In live trading the engine keeps consuming ticks while Jev answers. In replay it stops reading the source until in-flight decisions resolve, so the simulated clock cannot run ahead of the decision. The answer is then applied at simulated time `bar_close + latency`, where latency is the measured or recorded Jev latency. The order fills against the first event after that time. This one flag (`WaitForDecisions`) is the only behavioural difference between the two paths. It exists so a slow or fast backtest machine cannot change the result.
 
@@ -211,7 +211,7 @@ There is no external message bus. Components talk over Go channels inside one pr
   - an unknown option;
   - probabilities that do not sum to about 1.
 - **Circuit breaker.** After N consecutive failures, it stops calling Jev for a cool-down period and returns HOLD.
-- `jev` and `Decider` take the encoded snapshot as `json.RawMessage`, so `decide` imports only `domain` and both can be built and tested before #6 lands.
+- `jev` and `Decider` take the encoded snapshot as `json.RawMessage`. `jev` returns failures as `domain.DecideError{Reason}`, which `HoldOnFailure` reads with `errors.As`. So `decide` imports only `domain`, and both can be built and tested before #6 lands.
 
 **`risk` (#8).**
 - **Pure core.** `Evaluate(decision, book, limits, now) Verdict` has no I/O. Its stateful parts are the order-rate window and the kill-switch flag; both live in the engine-owned book.
@@ -225,12 +225,12 @@ There is no external message bus. Components talk over Go channels inside one pr
 - **Square-off.** It emits exit intents at a configured time (default 15:10 IST), ahead of the broker's own intraday square-off.
 - **Shorts.** `SELL` with no position is rejected unless `allow_short` is set (default `false`).
 - **Final authority by construction.** `risk.Approval` has unexported fields, and only `package risk` can create one. `orders.Manager.Submit` accepts only an `Approval`, so the compiler rejects any path that places an unapproved order.
-- **Independent of Jev.** Risk-driven exits (loss limit, square-off, kill switch) do not wait for Jev. A HOLD never blocks an exit.
+- **Independent of Jev.** Risk-driven exits (loss limit, square-off, kill switch) do not wait for Jev. A HOLD never blocks an exit. Each exit is logged as its own cycle record with a risk-originated cycle id and its reason.
 - **Kill switch.** Triggered by `SIGUSR1`, by a `KILL` file in the state directory, or automatically on repeated broker rejections or an IP-whitelist error. It blocks new entries and flattens open positions.
 
 **`orders` (#9).**
 - **Idempotent placement.**
-  - Each intent gets a deterministic client id derived from the decision id. It is sent as Kite's order `tag`.
+  - Each intent gets a deterministic client id derived from its cycle id (a Jev decision or a risk-driven exit). It is sent as Kite's order `tag`.
   - The intent is persisted in the decision log before `Place`.
   - On restart, the manager reconciles the open intents against the broker's order book by tag before placing anything new.
 - **Order types.** Entries use limit orders, or market orders with non-zero market protection. Modifications are capped below 25 per order, after which the order is cancelled and replaced.
@@ -245,11 +245,11 @@ There is no external message bus. Components talk over Go channels inside one pr
 
 **`decisionlog` + `replay` + `engine` (#10).**
 - **Records.** The log is append-only; rows are never updated.
-  - One decision row per cycle, written before any order is submitted:
-    - run id, mode, instrument alias and symbol;
+  - One cycle row per decision cycle or risk-driven exit, written before any order is submitted:
+    - cycle id, source (`jev` or `risk`), run id, mode, instrument alias and symbol;
     - bar close time;
     - snapshot JSON and schema version;
-    - model id, raw answer, latency and HOLD reason;
+    - model id, raw answer, latency and HOLD reason, or the exit reason for a risk-driven exit;
     - risk verdict and reasons;
     - intent and client id.
   - One order-event row per broker update, keyed by the client id: ack, broker id, rejection, partial or full fill, and costs.
@@ -297,12 +297,13 @@ TimescaleDB, considered in 0001, is **deferred**. It adds a server to operate, a
 | #7 Jev client | `jev`, `decide` (`HoldOnFailure`) | none | encoded fixture states and an `httptest` fake |
 | #8 Risk gate | `risk` | none for code | `domain.Decision` (this report) |
 | #9 Order manager | `orders`, `orders/paper`, `orders/kite` (gated) | #8 for the `risk.Approval` API; #3 for live only | the `Approval` API in this report and fixture events |
-| #10 Log and replay | `decisionlog`, `engine`, `replay`, `decide` (baselines), `marketdata/replay`, `cmd run/replay` | all of #4–#9 | — |
+| #10 Log and replay | `decisionlog`, `engine`, `replay`, `decide` (baselines), `marketdata/replay`, `cmd run/replay` | all of #3–#9 | — |
 
 ```mermaid
 flowchart LR
   I3["#3 auth"] -. live only .-> I4["#4 ingest"]
   I3 -. live only .-> I9
+  I3 --> I10
   I4 --> I10
   I5["#5 bars"] -. integration only .-> I6["#6 snapshot"]
   I5 --> I10
