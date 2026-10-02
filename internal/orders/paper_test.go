@@ -34,7 +34,7 @@ func TestManagerWithPaperBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b.OnTick(domain.Tick{Token: infy.Token, LastPrice: 249, ExchangeTime: t0.Add(time.Second)})
+	b.OnTick(domain.Tick{InstrumentToken: infy.Token, LastPrice: 249, ExchangeTime: t0.Add(time.Second)})
 
 	var fills []domain.Fill
 	for len(b.Updates()) > 0 {

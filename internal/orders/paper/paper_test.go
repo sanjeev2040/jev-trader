@@ -58,7 +58,7 @@ func drain(b *paper.Broker) []domain.OrderUpdate {
 }
 
 func tick(price float64, at time.Time) domain.Tick {
-	return domain.Tick{Token: infy.Token, LastPrice: price, ExchangeTime: at}
+	return domain.Tick{InstrumentToken: infy.Token, LastPrice: price, ExchangeTime: at}
 }
 
 func place(t *testing.T, b *paper.Broker, o domain.OrderIntent) string {
@@ -127,7 +127,7 @@ func TestPlaceAcksAndFillsOnFirstLaterTick(t *testing.T) {
 	}
 	// A tick at the order time, or on another instrument, does not fill.
 	b.OnTick(tick(100, t0))
-	b.OnTick(domain.Tick{Token: 1, LastPrice: 50, ExchangeTime: t0.Add(time.Second)})
+	b.OnTick(domain.Tick{InstrumentToken: 1, LastPrice: 50, ExchangeTime: t0.Add(time.Second)})
 	if u := drain(b); len(u) != 0 {
 		t.Fatalf("filled early: %+v", u)
 	}
@@ -150,7 +150,7 @@ func TestTickFallsBackToReceiveTime(t *testing.T) {
 	b, _ := newBroker(t, paper.Config{})
 	place(t, b, intent("c1", domain.ActionBuy, domain.OrderTypeMarket, 0))
 	drain(b)
-	b.OnTick(domain.Tick{Token: infy.Token, LastPrice: 100, ReceivedAt: t0.Add(time.Millisecond)})
+	b.OnTick(domain.Tick{InstrumentToken: infy.Token, LastPrice: 100, ReceivedAt: t0.Add(time.Millisecond)})
 	if u := drain(b); len(u) != 1 || u[0].Status != domain.OrderStatusFilled {
 		t.Fatalf("updates = %+v", u)
 	}

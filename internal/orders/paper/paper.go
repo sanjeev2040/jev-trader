@@ -207,7 +207,7 @@ func (b *Broker) OnTick(t domain.Tick) {
 	if at.IsZero() {
 		at = t.ReceivedAt
 	}
-	b.offer(t.Token, at, func(fillsFrom time.Time) bool { return at.After(fillsFrom) },
+	b.offer(t.InstrumentToken, at, func(fillsFrom time.Time) bool { return at.After(fillsFrom) },
 		t.LastPrice, t.LastPrice, t.LastPrice)
 }
 
