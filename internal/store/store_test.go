@@ -443,3 +443,38 @@ func TestReplayedTicksBuildTheBarsLiveBuilt(t *testing.T) {
 	})
 	equalBars(t, replayed, live)
 }
+
+func TestScanReadsOnlyDatesThatCanMatch(t *testing.T) {
+	root := t.TempDir()
+	day := func(d, h, m, s int) time.Time { return time.Date(2026, 10, d, h, m, s, 0, ist) }
+	late := tickAt(1, day(2, 0, 0, 1))
+	late.ExchangeTime = day(1, 23, 59, 59).UTC()
+	writeTicks(t, root, late)
+	lateBar := fixtureBar(1, 30*time.Minute, day(1, 23, 30, 0), 1)
+	writeBars(t, root, KindBars, lateBar)
+	// A corrupt file on a later date proves a bounded scan never opens it.
+	for kind, name := range map[string]string{KindTicks: "ticks-000000.parquet", KindBars: "bars-0000-000.parquet"} {
+		dir := filepath.Join(root, kind, "date=2026-10-03")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("corrupt"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	q := Query{From: day(1, 0, 0, 0), To: day(2, 0, 0, 0)}
+	got := scanAll(t, root, q)
+	if len(got) != 1 || got[0].LastPrice != late.LastPrice {
+		t.Fatalf("one-day ticks = %+v; want only the tick received after midnight", got)
+	}
+	bars, err := ReadBars(root, KindBars, BarQuery{Query: q})
+	if err != nil {
+		t.Fatal(err)
+	}
+	equalBars(t, bars, []domain.Bar{lateBar})
+
+	if err := ScanTicks(root, Query{}, func(domain.Tick) error { return nil }); err == nil {
+		t.Error("an unbounded scan skipped the corrupt file")
+	}
+}

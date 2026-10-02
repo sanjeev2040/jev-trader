@@ -18,6 +18,13 @@ import (
 	"github.com/sanjeev2040/jev-trader/internal/domain"
 )
 
+const (
+	// maxReceiveLag bounds how long after its exchange time a tick is received.
+	maxReceiveLag = 5 * time.Minute
+	// maxBarInterval is the longest bar interval bars.Builder builds.
+	maxBarInterval = 30 * time.Minute
+)
+
 // Query selects stored rows by event time and instrument. Zero values mean
 // no bound and every instrument.
 type Query struct {
@@ -45,13 +52,9 @@ func (q Query) match(token uint32, ts time.Time) bool {
 // were recorded, so replay feeds bars.Builder exactly what the live run saw. It
 // stops at the first error fn returns and returns it.
 func ScanTicks(root string, q Query, fn func(domain.Tick) error) error {
-	// A tick is filed under its receive time, which follows its exchange time,
-	// so a tick inside the query can be filed up to a day after its upper bound.
-	to := q.To
-	if !to.IsZero() {
-		to = to.Add(24 * time.Hour)
-	}
-	return scan(root, KindTicks, "ticks", strconv.Itoa(TickSchemaVersion), q.From, to, func(rows []TickRow) error {
+	// A tick is filed under its receive time, which can trail its exchange time
+	// by up to maxReceiveLag.
+	return scan(root, KindTicks, "ticks", strconv.Itoa(TickSchemaVersion), q.From, widen(q.To, maxReceiveLag), func(rows []TickRow) error {
 		for _, r := range rows {
 			t := rowToTick(r)
 			ts := t.ExchangeTime
@@ -75,13 +78,8 @@ func ScanBars(root, kind string, q BarQuery, fn func(domain.Bar) error) error {
 	if kind != KindBars && kind != KindBackfill {
 		return fmt.Errorf("store: %q is not a bar kind", kind)
 	}
-	// A bar is filed under its end, which can be up to a day after a bar start
-	// inside the query, so widen the upper bound when choosing dates.
-	to := q.To
-	if !to.IsZero() {
-		to = to.Add(24 * time.Hour)
-	}
-	return scan(root, kind, BarSchemaName, barSchemaVersion, q.From, to, func(rows []barRow) error {
+	// A bar is filed under its end, at most maxBarInterval after its start.
+	return scan(root, kind, BarSchemaName, barSchemaVersion, q.From, widen(q.To, maxBarInterval), func(rows []barRow) error {
 		bars := make([]domain.Bar, 0, len(rows))
 		for _, r := range rows {
 			b := rowToBar(r)
@@ -117,6 +115,14 @@ func ReadBars(root, kind string, q BarQuery) ([]domain.Bar, error) {
 	return out, err
 }
 
+// widen extends an upper bound by d; zero stays unbounded.
+func widen(to time.Time, d time.Duration) time.Time {
+	if to.IsZero() {
+		return to
+	}
+	return to.Add(d)
+}
+
 // scan reads the files of kind one window at a time, in time order, and
 // passes each window's rows to fn. Only date partitions that can hold rows in
 // [from, to) are opened. A missing kind directory holds no rows.
@@ -133,7 +139,7 @@ func scan[R any](root, kind, schema, version string, from, to time.Time, fn func
 		lo = from.In(ist).Format(time.DateOnly)
 	}
 	if !to.IsZero() {
-		hi = to.In(ist).Format(time.DateOnly)
+		hi = to.Add(-1).In(ist).Format(time.DateOnly)
 	}
 	for _, d := range dates { // ReadDir sorts by name, so dates ascend
 		date, ok := strings.CutPrefix(d.Name(), "date=")
