@@ -31,3 +31,24 @@ type Position struct {
 	Quantity   int64
 	AvgPrice   float64
 }
+
+// OrderIntent is an order the risk gate has approved for placement.
+type OrderIntent struct {
+	CycleID    string // Jev decision cycle or risk-driven exit that produced the order
+	Instrument Instrument
+	Side       Action  // ActionBuy or ActionSell
+	Quantity   int64   // shares, always > 0
+	RefPrice   float64 // last known price when approved; 0 if unknown
+	ReduceOnly bool    // the order only reduces an open position
+}
+
+// Fill is a partial or full execution of an order.
+type Fill struct {
+	ClientID   string
+	Instrument Instrument
+	Side       Action // ActionBuy or ActionSell
+	Quantity   int64  // shares, always > 0
+	Price      float64
+	Charges    float64 // brokerage, taxes and fees for this fill
+	Time       time.Time
+}
