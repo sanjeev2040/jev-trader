@@ -108,6 +108,10 @@ func TestRunSubscribesConvertsAndPublishes(t *testing.T) {
 	s, f := newTestSource(t, func(ctx context.Context, f *fakeTicker) {
 		f.onConnect()
 		f.onTick(vendor)
+		unsent := vendor
+		unsent.Timestamp = models.Time{Time: time.Unix(0, 0)}
+		unsent.LastTradeTime = models.Time{Time: time.Unix(0, 0)}
+		f.onTick(unsent)
 		<-ctx.Done()
 	})
 	out := make(chan marketdata.Event, 4)
@@ -130,6 +134,10 @@ func TestRunSubscribesConvertsAndPublishes(t *testing.T) {
 	if !reflect.DeepEqual(*ev.Tick, want) {
 		t.Errorf("tick =\n%+v\nwant\n%+v", *ev.Tick, want)
 	}
+	ev = <-out
+	if !ev.Tick.ExchangeTime.IsZero() || !ev.Tick.LastTradeTime.IsZero() {
+		t.Errorf("unsent times = %v and %v, want zero", ev.Tick.ExchangeTime, ev.Tick.LastTradeTime)
+	}
 
 	cancel()
 	if err := <-errc; err != nil {
@@ -144,7 +152,7 @@ func TestRunSubscribesConvertsAndPublishes(t *testing.T) {
 	if want := []kiteticker.Mode{kiteticker.ModeFull}; !reflect.DeepEqual(f.modes, want) {
 		t.Errorf("modes %v, want %v", f.modes, want)
 	}
-	if st := s.Stats(); st.Published != 1 || st.Connects != 1 {
+	if st := s.Stats(); st.Published != 2 || st.Connects != 1 {
 		t.Errorf("stats = %+v", st)
 	}
 }

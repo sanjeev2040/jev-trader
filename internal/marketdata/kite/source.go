@@ -235,9 +235,9 @@ func (s *Source) convert(mt models.Tick) domain.Tick {
 	t := domain.Tick{
 		InstrumentToken:   mt.InstrumentToken,
 		Symbol:            s.symbols[mt.InstrumentToken],
-		ExchangeTime:      mt.Timestamp.Time,
+		ExchangeTime:      feedTime(mt.Timestamp.Time),
 		ReceivedAt:        s.cfg.Now(),
-		LastTradeTime:     mt.LastTradeTime.Time,
+		LastTradeTime:     feedTime(mt.LastTradeTime.Time),
 		LastPrice:         mt.LastPrice,
 		LastQuantity:      int64(mt.LastTradedQuantity),
 		AveragePrice:      mt.AverageTradePrice,
@@ -254,6 +254,15 @@ func (s *Source) convert(mt models.Tick) domain.Tick {
 		b, a := mt.Depth.Buy[i], mt.Depth.Sell[i]
 		t.Bids[i] = domain.DepthLevel{Price: b.Price, Quantity: int64(b.Quantity), Orders: int64(b.Orders)}
 		t.Asks[i] = domain.DepthLevel{Price: a.Price, Quantity: int64(a.Quantity), Orders: int64(a.Orders)}
+	}
+	return t
+}
+
+// feedTime maps the epoch the vendor decodes from an unsent (0) field to the
+// zero time.
+func feedTime(t time.Time) time.Time {
+	if t.Unix() == 0 {
+		return time.Time{}
 	}
 	return t
 }
