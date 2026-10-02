@@ -32,7 +32,7 @@ wiring behind it anyway. Enabling live trading is a separate, reviewed change.
 
 ```
 jevtrader replay --data-dir data --from 2026-10-05 --to 2026-10-09 \
-  --index <nifty-token> --deciders hold,momentum,jev --model <pinned-jev-model-id>
+  --deciders hold,momentum,jev --model <pinned-jev-model-id>
 ```
 
 Runs the stored data through the engine once per decider. Each run gets its own
@@ -41,6 +41,9 @@ simulated clock, and the engine waits for each decision before reading more
 data, so the result does not depend on machine speed. Orders fill after the
 decision's bar close plus latency (`--latency`, or each decision's measured or
 recorded latency), never at the close that triggered them.
+
+The index (`--index`, default `NSE:NIFTY 50`) is found by symbol in the stored
+data, kept as snapshot context even under `--tokens`, and never traded.
 
 `recorded:<run-id>` answers from an earlier run's stored answers: a regression
 replay of everything except the model. The report says if any snapshot had no

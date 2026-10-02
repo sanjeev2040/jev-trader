@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/sanjeev2040/jev-trader/internal/replay"
 	"github.com/sanjeev2040/jev-trader/internal/risk"
 	"github.com/sanjeev2040/jev-trader/internal/snapshot"
+	"github.com/sanjeev2040/jev-trader/internal/store"
 )
 
 // defaultDecisionLog is where run and replay keep the decision log.
@@ -50,8 +52,8 @@ func replayCmd(ctx context.Context, args []string, e env) error {
 	source := fs.String("source", "ticks", "stored data to replay: ticks, bars (built from ticks) or backfill (Kite historical candles)")
 	from := fs.String("from", "", "first IST day to replay, YYYY-MM-DD (default: from the start of the data)")
 	to := fs.String("to", "", "last IST day to replay, YYYY-MM-DD (default: to the end of the data)")
-	tokens := fs.String("tokens", "", "comma-separated Kite instrument tokens to replay (default: all, the index included)")
-	index := fs.Uint("index", 0, "Kite instrument token of the NIFTY 50 index, used as snapshot context and never traded")
+	tokens := fs.String("tokens", "", "comma-separated Kite instrument tokens to replay (default: all)")
+	indexKey := fs.String("index", "NSE:NIFTY 50", `index used as snapshot context and never traded, found by symbol in the stored data; "" for none`)
 	deciders := fs.String("deciders", "hold,momentum", "comma-separated deciders: hold, momentum, jev, recorded:<run-id>")
 	logPath := fs.String("log", defaultDecisionLog, "decision log (SQLite) the replay runs are written to")
 	prefix := fs.String("run-prefix", "", "run id prefix; runs are <prefix>-<decider> (default: replay-<UTC time>)")
@@ -82,8 +84,9 @@ func replayCmd(ctx context.Context, args []string, e env) error {
 	if err != nil {
 		return usageError{err}
 	}
-	if *index > uint(^uint32(0)) {
-		return usageError{fmt.Errorf("--index %d is not a Kite instrument token", *index)}
+	indexToken, err := resolveIndex(&cfg, *indexKey)
+	if err != nil {
+		return err
 	}
 	names := splitList(*deciders)
 	if len(names) == 0 {
@@ -117,7 +120,7 @@ func replayCmd(ctx context.Context, args []string, e env) error {
 		SourceName: string(cfg.Kind), Label: cfg.Label(),
 		Limits: limits, Paper: paper.DefaultConfig(), Bars: bars.Config{},
 		Snapshot:   snapshot.Config{SizeThresholds: [2]float64{limits.SizeNotional[domain.SizeS], limits.SizeNotional[domain.SizeM]}},
-		IndexToken: uint32(*index), RunPrefix: *prefix,
+		IndexToken: indexToken, RunPrefix: *prefix,
 		Latency: *latency, DecideTimeout: *decideTimeout, Horizon: *horizon,
 	}, specs)
 	if err != nil {
@@ -177,6 +180,51 @@ func parseSource(dataDir, source, from, to, tokens string) (mdreplay.Config, err
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+var errIndexFound = errors.New("index found")
+
+// resolveIndex finds the index token in the stored data by its
+// EXCHANGE:SYMBOL key, and makes sure a token filter still lets the index
+// through as context. Zero means the store holds no such index. The engine
+// never trades IndexToken.
+func resolveIndex(cfg *mdreplay.Config, key string) (uint32, error) {
+	if key == "" {
+		return 0, nil
+	}
+	q := store.Query{From: cfg.From, To: cfg.To}
+	var token uint32
+	found := func(t uint32, symbol string) error {
+		if symbol != key {
+			return nil
+		}
+		token = t
+		return errIndexFound
+	}
+	var err error
+	if cfg.Kind == mdreplay.Ticks {
+		err = store.ScanTicks(cfg.Root, q, func(t domain.Tick) error {
+			return found(t.InstrumentToken, t.Symbol)
+		})
+	} else {
+		interval := cfg.BarInterval
+		if interval == 0 {
+			interval = time.Minute
+		}
+		err = store.ScanBars(cfg.Root, string(cfg.Kind), store.BarQuery{Query: q, Interval: interval}, func(b domain.Bar) error {
+			return found(b.Instrument.Token, b.Instrument.Exchange+":"+b.Instrument.Symbol)
+		})
+	}
+	if err != nil && !errors.Is(err, errIndexFound) {
+		return 0, fmt.Errorf("resolving index %q: %w", key, err)
+	}
+	if token == 0 {
+		return 0, nil
+	}
+	if len(cfg.Tokens) > 0 && !slices.Contains(cfg.Tokens, token) {
+		cfg.Tokens = append(cfg.Tokens, token)
+	}
+	return token, nil
 }
 
 // buildSpecs turns decider names into replay specs.

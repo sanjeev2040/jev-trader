@@ -161,7 +161,7 @@ func TestTradeSessionRecordsDecisionsTicksAndBars(t *testing.T) {
 func TestReplayCommandEndToEnd(t *testing.T) {
 	root := writeFixtureTicks(t)
 	logPath := filepath.Join(t.TempDir(), "nested", "decisions.db")
-	base := []string{"replay", "--data-dir", root, "--log", logPath, "--index", "99", "--format", "json"}
+	base := []string{"replay", "--data-dir", root, "--log", logPath, "--format", "json"}
 
 	e, stdout, stderr := testEnv(nil)
 	if code := run(context.Background(), append(base, "--run-prefix", "cli", "--from", "2026-10-05", "--to", "2026-10-05"), e); code != 0 {
@@ -180,7 +180,7 @@ func TestReplayCommandEndToEnd(t *testing.T) {
 
 	// A regression replay from the first run's log, as text.
 	e, stdout, stderr = testEnv(nil)
-	args := []string{"replay", "--data-dir", root, "--log", logPath, "--index", "99", "--run-prefix", "again", "--deciders", "recorded:cli-momentum"}
+	args := []string{"replay", "--data-dir", root, "--log", logPath, "--run-prefix", "again", "--deciders", "recorded:cli-momentum"}
 	if code := run(context.Background(), args, e); code != 0 {
 		t.Fatalf("recorded replay: code %d, stderr %q", code, stderr.String())
 	}
@@ -193,11 +193,47 @@ func TestReplayCommandEndToEnd(t *testing.T) {
 	// --out writes the report to a file.
 	e, stdout, _ = testEnv(nil)
 	outPath := filepath.Join(t.TempDir(), "report.txt")
-	if code := run(context.Background(), []string{"replay", "--data-dir", root, "--log", logPath, "--index", "99", "--run-prefix", "file", "--deciders", "hold", "--out", outPath}, e); code != 0 {
+	if code := run(context.Background(), []string{"replay", "--data-dir", root, "--log", logPath, "--run-prefix", "file", "--deciders", "hold", "--out", outPath}, e); code != 0 {
 		t.Fatalf("--out: code %d", code)
 	}
 	if b, err := os.ReadFile(outPath); err != nil || !strings.Contains(string(b), "file-hold") || stdout.String() != "" {
 		t.Errorf("report file = %q, %v; stdout %q", b, err, stdout.String())
+	}
+}
+
+func TestReplayNeverTradesTheStoredIndex(t *testing.T) {
+	root := writeFixtureTicks(t)
+	traded := func(index ...string) bool {
+		logPath := filepath.Join(t.TempDir(), "d.db")
+		args := append([]string{"replay", "--data-dir", root, "--log", logPath, "--run-prefix", "x", "--deciders", "momentum"}, index...)
+		e, _, stderr := testEnv(nil)
+		if code := run(context.Background(), args, e); code != 0 {
+			t.Fatalf("code %d, stderr %q", code, stderr.String())
+		}
+		log, err := decisionlog.Open(logPath, decisionlog.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer log.Close()
+		cs, _ := log.Cycles(context.Background(), "x-momentum")
+		if len(cs) == 0 {
+			t.Fatal("no cycles logged")
+		}
+		for _, c := range cs {
+			if c.Instrument.Token == 99 {
+				return true
+			}
+		}
+		return false
+	}
+	if traded() {
+		t.Error("default --index traded the NIFTY 50 index")
+	}
+	if traded("--tokens", "1") {
+		t.Error("--tokens without the index traded it")
+	}
+	if !traded("--index", "") {
+		t.Error("--index \"\" should leave the index an ordinary instrument")
 	}
 }
 
