@@ -23,10 +23,10 @@ var (
 	testCfg = Config{SizeThresholds: [2]float64{50_000, 200_000}}
 )
 
-// session returns the open and close of the session on the given day.
-func session(day time.Time) (open, close time.Time) {
+// sessionOpen returns the open of the session on the given day.
+func sessionOpen(day time.Time) time.Time {
 	y, m, d := day.Date()
-	return time.Date(y, m, d, 9, 15, 0, 0, ist), time.Date(y, m, d, 15, 30, 0, 0, ist)
+	return time.Date(y, m, d, 9, 15, 0, 0, ist)
 }
 
 // fixtureBars returns n 1-minute bars from open, with prices scaled by scale.
@@ -55,16 +55,15 @@ func fixtureBars(inst domain.Instrument, open time.Time, n int, scale float64) [
 }
 
 func fixtureInput(day time.Time, n int, scale float64) Input {
-	open, close := session(day)
+	open := sessionOpen(day)
 	bars := fixtureBars(infy, open, n, scale)
 	return Input{
-		Alias:        "I01",
-		Now:          bars[n-1].End,
-		SessionOpen:  open,
-		SessionClose: close,
-		Bars:         bars,
-		IndexBars:    fixtureBars(nifty, open, n, 220*scale),
-		Position:     domain.Position{Instrument: infy, Quantity: 100, AvgPrice: 99.5 * scale},
+		Alias:       "I01",
+		Now:         bars[n-1].End,
+		SessionOpen: open,
+		Bars:        bars,
+		IndexBars:   fixtureBars(nifty, open, n, 220*scale),
+		Position:    domain.Position{Instrument: infy, Quantity: 100, AvgPrice: 99.5 * scale},
 	}
 }
 
@@ -163,13 +162,13 @@ func TestShortHistoryGivesNulls(t *testing.T) {
 	if s.Index.Available || s.Index.ReturnsPct.Bars1 != nil {
 		t.Errorf("index = %+v, want unavailable", s.Index)
 	}
-	if s.Session.MinutesSinceOpen != 3 || s.Session.MinutesToClose != 372 {
-		t.Errorf("session = %+v, want {3 372}", s.Session)
+	if s.Session.MinutesSinceOpen != 3 {
+		t.Errorf("session = %+v, want {3}", s.Session)
 	}
 }
 
 func TestFeatures(t *testing.T) {
-	open, close := session(day1)
+	open := sessionOpen(day1)
 	bar := func(i int, o, h, l, c float64, v int64) domain.Bar {
 		start := open.Add(time.Duration(i) * time.Minute)
 		return domain.Bar{Instrument: infy, Interval: time.Minute, Start: start, End: start.Add(time.Minute),
@@ -179,7 +178,7 @@ func TestFeatures(t *testing.T) {
 		bar(0, 100, 101, 99, 100, 100),
 		bar(1, 100, 104, 100, 104, 300),
 	}
-	s, err := Build(testCfg, Input{Alias: "I01", Now: bars[1].End, SessionOpen: open, SessionClose: close, Bars: bars})
+	s, err := Build(testCfg, Input{Alias: "I01", Now: bars[1].End, SessionOpen: open, Bars: bars})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +257,6 @@ func TestBuildRejects(t *testing.T) {
 		{"zero price", testCfg, func(in *Input) { in.Bars[5].Low = 0 }, "invalid"},
 		{"position other instrument", testCfg, func(in *Input) { in.Position.Instrument = nifty }, "position"},
 		{"position without price", testCfg, func(in *Input) { in.Position.AvgPrice = 0 }, "average price"},
-		{"bad session", testCfg, func(in *Input) { in.SessionClose = in.SessionOpen }, "session"},
 		{"bad thresholds", Config{SizeThresholds: [2]float64{10, 5}}, func(*Input) {}, "thresholds"},
 	}
 	for _, tt := range tests {

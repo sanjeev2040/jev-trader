@@ -2,8 +2,7 @@
   "schema_version": 1,
   "instrument": "I01",
   "session": {
-    "minutes_since_open": 40,
-    "minutes_to_close": 335
+    "minutes_since_open": 40
   },
   "features": {
     "returns_pct": {

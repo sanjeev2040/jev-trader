@@ -27,9 +27,6 @@ import (
 // SchemaVersion is the version of the Snapshot JSON schema.
 const SchemaVersion = 1
 
-// Lookbacks are the return horizons, in bars, reported in Returns.
-var Lookbacks = [...]int{1, 5, 15, 30}
-
 // Position sides.
 const (
 	SideFlat  = "FLAT"
@@ -59,10 +56,9 @@ type Snapshot struct {
 // Session is the session clock, relative to the open.
 type Session struct {
 	MinutesSinceOpen int `json:"minutes_since_open"`
-	MinutesToClose   int `json:"minutes_to_close"`
 }
 
-// Returns are percentage close-to-close returns over the Lookbacks.
+// Returns are percentage close-to-close returns over 1, 5, 15 and 30 bars.
 type Returns struct {
 	Bars1  *float64 `json:"bars_1"`
 	Bars5  *float64 `json:"bars_5"`
@@ -112,13 +108,12 @@ func (c Config) Validate() error {
 
 // Input is everything Build reads. All bars must be closed by Now.
 type Input struct {
-	Alias        string          // opaque per-run alias of the instrument
-	Now          time.Time       // decision time, normally the triggering bar's close
-	SessionOpen  time.Time       // today's session open
-	SessionClose time.Time       // today's session close
-	Bars         []domain.Bar    // the instrument's closed bars this session, oldest first
-	IndexBars    []domain.Bar    // NIFTY 50 closed bars this session, oldest first; may be empty
-	Position     domain.Position // open position; zero Quantity means flat
+	Alias       string          // opaque per-run alias of the instrument
+	Now         time.Time       // decision time, normally the triggering bar's close
+	SessionOpen time.Time       // today's session open
+	Bars        []domain.Bar    // the instrument's closed bars this session, oldest first
+	IndexBars   []domain.Bar    // NIFTY 50 closed bars this session, oldest first; may be empty
+	Position    domain.Position // open position; zero Quantity means flat
 }
 
 var aliasPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
@@ -132,9 +127,6 @@ func Build(cfg Config, in Input) (Snapshot, error) {
 	}
 	if err := validateAlias(in.Alias, in.Bars); err != nil {
 		return Snapshot{}, err
-	}
-	if !in.SessionOpen.Before(in.SessionClose) {
-		return Snapshot{}, errors.New("snapshot: session open must be before session close")
 	}
 	if in.Now.Before(in.SessionOpen) {
 		return Snapshot{}, errors.New("snapshot: now is before session open")
@@ -158,7 +150,6 @@ func Build(cfg Config, in Input) (Snapshot, error) {
 		Instrument:    in.Alias,
 		Session: Session{
 			MinutesSinceOpen: int(in.Now.Sub(in.SessionOpen) / time.Minute),
-			MinutesToClose:   max(0, int(in.SessionClose.Sub(in.Now)/time.Minute)),
 		},
 		Features: buildFeatures(in.Bars),
 		Position: pos,
@@ -249,10 +240,10 @@ func returns(bars []domain.Bar) Returns {
 		return ptr(round(pct(bars[len(bars)-1].Close, bars[len(bars)-1-k].Close) - 100))
 	}
 	return Returns{
-		Bars1:  ret(Lookbacks[0]),
-		Bars5:  ret(Lookbacks[1]),
-		Bars15: ret(Lookbacks[2]),
-		Bars30: ret(Lookbacks[3]),
+		Bars1:  ret(1),
+		Bars5:  ret(5),
+		Bars15: ret(15),
+		Bars30: ret(30),
 	}
 }
 
