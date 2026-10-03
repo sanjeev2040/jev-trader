@@ -35,6 +35,26 @@ func sessionOpen(t time.Time) time.Time {
 	return time.Date(y, m, d, sessionOpenHour, sessionOpenMinute, 0, 0, istLocation)
 }
 
+// windowEnd returns the end of the trading window on the IST day of t, or the
+// zero time when the window has no end.
+func (e *Engine) windowEnd(t time.Time) time.Time {
+	if e.cfg.Window.End == 0 {
+		return time.Time{}
+	}
+	y, m, d := t.In(istLocation).Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, istLocation).Add(e.cfg.Window.End)
+}
+
+// beforeWindow reports whether a bar starts before the window opens, which
+// makes it warm-up: it is kept, never decided on.
+func (e *Engine) beforeWindow(b domain.Bar) bool {
+	if e.cfg.Window.Start == 0 {
+		return false
+	}
+	y, m, d := b.Start.In(istLocation).Date()
+	return b.Start.Before(time.Date(y, m, d, 0, 0, 0, 0, istLocation).Add(e.cfg.Window.Start))
+}
+
 // onBarClosed handles a closed bar: it goes to the sink, and a bar of the
 // decision interval for a watched instrument starts a decision cycle.
 func (e *Engine) onBarClosed(ctx context.Context, b domain.Bar) error {
@@ -43,6 +63,9 @@ func (e *Engine) onBarClosed(ctx context.Context, b domain.Bar) error {
 	}
 	if b.Interval != e.base {
 		return nil
+	}
+	if end := e.windowEnd(b.Start); !end.IsZero() && b.End.After(end) {
+		return nil // past the window: only the sink saw it
 	}
 	open := sessionOpen(b.Start)
 	if b.Start.Before(open) {
@@ -58,7 +81,7 @@ func (e *Engine) onBarClosed(ctx context.Context, b domain.Bar) error {
 	if err := e.sampleEquity(ctx, b.End); err != nil {
 		return err
 	}
-	if token == e.cfg.IndexToken {
+	if token == e.cfg.IndexToken || e.beforeWindow(b) {
 		return nil
 	}
 	e.stats.Bars++
@@ -209,6 +232,9 @@ func (e *Engine) onResult(ctx context.Context, r result) error {
 		if d.HoldReason != "" {
 			e.stats.HoldSubstitutions++
 		}
+	}
+	if sale, rotating := verdict.Rotation(); rotating {
+		return e.startRotation(ctx, c, d, sale, now)
 	}
 	if !approved {
 		return nil

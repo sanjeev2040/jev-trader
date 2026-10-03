@@ -60,6 +60,7 @@ trap 'rm -f "$tmp"' EXIT
   fetch_secret kite-api-key KITE_API_KEY
   fetch_secret kite-api-secret KITE_API_SECRET
   fetch_secret jev-api-key JEV_API_KEY
+  fetch_trading_capital
 } > "$tmp"
 chmod 0600 "$tmp"
 mv "$tmp" "$RUN_DIR/secrets.env"

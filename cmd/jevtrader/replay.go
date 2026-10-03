@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -17,14 +18,15 @@ import (
 	"github.com/sanjeev2040/jev-trader/internal/decide"
 	"github.com/sanjeev2040/jev-trader/internal/decisionlog"
 	"github.com/sanjeev2040/jev-trader/internal/domain"
+	"github.com/sanjeev2040/jev-trader/internal/engine"
 	"github.com/sanjeev2040/jev-trader/internal/jev"
 	"github.com/sanjeev2040/jev-trader/internal/marketdata"
 	mdreplay "github.com/sanjeev2040/jev-trader/internal/marketdata/replay"
 	"github.com/sanjeev2040/jev-trader/internal/orders/paper"
 	"github.com/sanjeev2040/jev-trader/internal/replay"
-	"github.com/sanjeev2040/jev-trader/internal/risk"
 	"github.com/sanjeev2040/jev-trader/internal/snapshot"
 	"github.com/sanjeev2040/jev-trader/internal/store"
+	"github.com/sanjeev2040/jev-trader/internal/watchlist"
 )
 
 // defaultDecisionLog is where run and replay keep the decision log.
@@ -53,7 +55,14 @@ func replayCmd(ctx context.Context, args []string, e env) error {
 	from := fs.String("from", "", "first IST day to replay, YYYY-MM-DD (default: from the start of the data)")
 	to := fs.String("to", "", "last IST day to replay, YYYY-MM-DD (default: to the end of the data)")
 	tokens := fs.String("tokens", "", "comma-separated Kite instrument tokens to replay (default: all)")
-	indexKey := fs.String("index", "NSE:NIFTY 50", `index used as snapshot context and never traded, found by symbol in the stored data; "" for none`)
+	watchlistFile := fs.String("watchlist-file", "", "replay only the instruments of this watchlist file written by `jevtrader screen`, found in the stored data by symbol (the index stays as context); not with --tokens")
+	indexKey := fs.String("index", "NSE:NIFTY 50", `index used as snapshot context and never traded, found by EXCHANGE:SYMBOL in the stored data, or given as an instrument token (NIFTY 50 is 256265); "" for none`)
+	start := fs.String("start", "", "first IST time of day to trade, HH:MM; earlier bars of the day still warm the indicators up but are not decided on (default: the session open)")
+	end := fs.String("end", "", "IST time of day to stop at, HH:MM; later data is not traded, only used for the comparison (default: the close of the data)")
+	walkthrough := fs.String("walkthrough", "", `add each run's session to the report, instrument by instrument: "actions" (BUY/SELL answers, risk exits, fills) or "all" (every decision, HOLDs too)`)
+	compare := fs.Bool("compare", false, "add the comparison with the real market: the price after each BUY/SELL, and PnL against buy-and-hold and the hold and momentum baselines (those two are replayed too)")
+	lookahead := fs.String("lookahead", "5m,15m,30m", "with --compare, how long after each BUY/SELL to check the price, comma-separated")
+	capitalFlag := fs.Float64("capital", 0, capitalFlagHelp)
 	deciders := fs.String("deciders", "hold,momentum", "comma-separated deciders: hold, momentum, jev, recorded:<run-id>")
 	logPath := fs.String("log", defaultDecisionLog, "decision log (SQLite) the replay runs are written to")
 	prefix := fs.String("run-prefix", "", "run id prefix; runs are <prefix>-<decider> (default: replay-<UTC time>)")
@@ -65,7 +74,7 @@ func replayCmd(ctx context.Context, args []string, e env) error {
 	format := fs.String("format", "text", "report format: text or json")
 	out := fs.String("out", "", "write the report to this file instead of stdout")
 	fs.Usage = func() {
-		fmt.Fprintln(e.stderr, "usage: jevtrader replay [flags]\n\nReplays stored market data through the trading engine with a simulated clock and\nthe paper broker, once per decider, and prints an evaluation report.\nNo Kite account is needed; the jev decider reads JEV_API_KEY.\n\nflags:")
+		fmt.Fprintln(e.stderr, "usage: jevtrader replay [flags]\n\nReplays stored market data through the trading engine with a simulated clock and\nthe paper broker, once per decider, and prints an evaluation report.\nNo Kite account is needed; the jev decider reads JEV_API_KEY, or jev-api-key from the\nAzure Key Vault named by JEVTRADER_KEYVAULT.\n\nflags:")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -84,18 +93,62 @@ func replayCmd(ctx context.Context, args []string, e env) error {
 	if err != nil {
 		return usageError{err}
 	}
+	if *watchlistFile != "" {
+		if *tokens != "" {
+			return usageError{errors.New("--watchlist-file and --tokens both choose the instruments; give one")}
+		}
+		if err := applyWatchlistFile(&cfg, *watchlistFile, e.stderr); err != nil {
+			return err
+		}
+	}
 	indexToken, err := resolveIndex(&cfg, *indexKey)
 	if err != nil {
 		return err
+	}
+	if *indexKey != "" && indexToken == 0 {
+		fmt.Fprintf(e.stderr, "jevtrader replay: index %q is not in the stored data, so snapshots have no index context (backfill with --symbols to store symbols, or pass --index <token>)\n", *indexKey)
 	}
 	names := splitList(*deciders)
 	if len(names) == 0 {
 		return usageError{errors.New("--deciders is empty")}
 	}
+	window, err := parseWindow(*start, *end)
+	if err != nil {
+		return usageError{err}
+	}
+	var walk replay.WalkMode
+	switch replay.WalkMode(*walkthrough) {
+	case replay.WalkOff, replay.WalkActions, replay.WalkAll:
+		walk = replay.WalkMode(*walkthrough)
+	default:
+		return usageError{fmt.Errorf("--walkthrough %q is not actions or all", *walkthrough)}
+	}
+	horizons, err := parseLookahead(*lookahead)
+	if err != nil {
+		return usageError{err}
+	}
+	if *compare {
+		// The comparison needs the baselines to compare with.
+		for _, baseline := range []string{"hold", "momentum"} {
+			if !slices.Contains(names, baseline) {
+				names = append(names, baseline)
+				fmt.Fprintf(e.stderr, "jevtrader replay: --compare also replays the %s baseline\n", baseline)
+			}
+		}
+	}
 	if *prefix == "" {
 		*prefix = "replay-" + time.Now().UTC().Format("20060102T150405")
 	}
-	secrets := config.LoadSecrets(e.lookup)
+	var wanted []string
+	for _, name := range names {
+		if kind, _, _ := strings.Cut(name, ":"); kind == "jev" {
+			wanted = []string{config.EnvJevAPIKey}
+		}
+	}
+	secrets, err := loadSecrets(ctx, e, wanted...)
+	if err != nil {
+		return usageError{err}
+	}
 
 	if err := os.MkdirAll(filepath.Dir(*logPath), 0o755); err != nil {
 		return err
@@ -111,7 +164,12 @@ func replayCmd(ctx context.Context, args []string, e env) error {
 	if err != nil {
 		return usageError{err}
 	}
-	limits := risk.DefaultLimits()
+	capital, err := resolveCapital(ctx, e, *capitalFlag)
+	if err != nil {
+		return err
+	}
+	limits := tradingLimits(capital)
+	fmt.Fprintf(e.stderr, "jevtrader replay: capital budget ₹%.0f (%s: %s)\n", capital.Amount, capital.Source, capital.Detail)
 	rep, err := replay.Run(ctx, replay.Config{
 		Log: log,
 		NewSource: func() (marketdata.Source, error) {
@@ -119,9 +177,11 @@ func replayCmd(ctx context.Context, args []string, e env) error {
 		},
 		SourceName: string(cfg.Kind), Label: cfg.Label(),
 		Limits: limits, Paper: paper.DefaultConfig(), Bars: bars.Config{},
-		Snapshot:   snapshot.Config{SizeThresholds: [2]float64{limits.SizeNotional[domain.SizeS], limits.SizeNotional[domain.SizeM]}},
-		IndexToken: indexToken, RunPrefix: *prefix,
+		Snapshot:   snapshot.Config{SizeThresholds: sizeThresholds(limits)},
+		IndexToken: indexToken, RunPrefix: *prefix, Window: window,
 		Latency: *latency, DecideTimeout: *decideTimeout, Horizon: *horizon,
+		Walkthrough: walk, Compare: *compare, Lookahead: horizons,
+		BuyHoldNotional: buyHoldNotional(limits),
 	}, specs)
 	if err != nil {
 		return err
@@ -182,7 +242,119 @@ func parseSource(dataDir, source, from, to, tokens string) (mdreplay.Config, err
 	return cfg, nil
 }
 
+// parseWindow turns --start and --end (IST, HH:MM) into an engine window.
+func parseWindow(start, end string) (engine.Window, error) {
+	var w engine.Window
+	parse := func(flagName, v string) (time.Duration, error) {
+		t, err := time.Parse("15:04", v)
+		if err != nil {
+			return 0, fmt.Errorf("--%s %q is not a time of day, HH:MM", flagName, v)
+		}
+		return time.Duration(t.Hour())*time.Hour + time.Duration(t.Minute())*time.Minute, nil
+	}
+	var err error
+	if start != "" {
+		if w.Start, err = parse("start", start); err != nil {
+			return w, err
+		}
+	}
+	if end != "" {
+		if w.End, err = parse("end", end); err != nil {
+			return w, err
+		}
+		if w.End <= w.Start {
+			return w, fmt.Errorf("--end %s is not after --start %s", end, start)
+		}
+	}
+	return w, nil
+}
+
+// parseLookahead parses --lookahead, a list of positive whole-minute durations.
+func parseLookahead(list string) ([]time.Duration, error) {
+	var out []time.Duration
+	for _, s := range splitList(list) {
+		d, err := time.ParseDuration(s)
+		if err != nil || d < time.Minute || d%time.Minute != 0 {
+			return nil, fmt.Errorf("--lookahead %q: want whole minutes such as 5m", s)
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
 var errIndexFound = errors.New("index found")
+
+var errAllFound = errors.New("all instruments found")
+
+// applyWatchlistFile limits the replay to the instruments of a watchlist file.
+// The file names instruments by EXCHANGE:SYMBOL and the stored data by token,
+// so it looks the symbols up in the data it is about to replay; one that is
+// not stored is reported and skipped, and none stored at all is an error.
+func applyWatchlistFile(cfg *mdreplay.Config, path string, warn io.Writer) error {
+	f, err := watchlist.Read(path)
+	if err != nil {
+		return usageError{err}
+	}
+	day, _ := time.ParseInLocation(time.DateOnly, f.Date, ist)
+	if (!cfg.From.IsZero() && day.Before(cfg.From)) || (!cfg.To.IsZero() && !day.Before(cfg.To)) {
+		fmt.Fprintf(warn, "jevtrader replay: %s is the watchlist for %s, which is outside the replayed days\n", path, f.Date)
+	}
+	found, err := findTokens(*cfg, f.Keys())
+	if err != nil {
+		return err
+	}
+	var missing []string
+	for _, key := range f.Keys() {
+		if token, ok := found[key]; ok {
+			cfg.Tokens = append(cfg.Tokens, token)
+		} else {
+			missing = append(missing, key)
+		}
+	}
+	if len(cfg.Tokens) == 0 {
+		return fmt.Errorf("none of the %d instruments of %s is in the stored data (backfill with --symbols so the bars carry their symbol)", len(f.Entries), path)
+	}
+	if len(missing) > 0 {
+		fmt.Fprintf(warn, "jevtrader replay: %d of the watchlist's instruments are not in the stored data and are skipped: %s\n", len(missing), strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// findTokens scans the stored data for the tokens of the EXCHANGE:SYMBOL keys,
+// stopping once all are found.
+func findTokens(cfg mdreplay.Config, keys []string) (map[string]uint32, error) {
+	want := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		want[k] = true
+	}
+	found := map[string]uint32{}
+	see := func(token uint32, key string) error {
+		if want[key] {
+			found[key] = token
+			if len(found) == len(want) {
+				return errAllFound
+			}
+		}
+		return nil
+	}
+	q := store.Query{From: cfg.From, To: cfg.To}
+	var err error
+	if cfg.Kind == mdreplay.Ticks {
+		err = store.ScanTicks(cfg.Root, q, func(t domain.Tick) error { return see(t.InstrumentToken, t.Symbol) })
+	} else {
+		interval := cfg.BarInterval
+		if interval == 0 {
+			interval = time.Minute
+		}
+		err = store.ScanBars(cfg.Root, string(cfg.Kind), store.BarQuery{Query: q, Interval: interval}, func(b domain.Bar) error {
+			return see(b.Instrument.Token, b.Instrument.Exchange+":"+b.Instrument.Symbol)
+		})
+	}
+	if err != nil && !errors.Is(err, errAllFound) {
+		return nil, fmt.Errorf("looking up the watchlist in the stored data: %w", err)
+	}
+	return found, nil
+}
 
 // resolveIndex finds the index token in the stored data by its
 // EXCHANGE:SYMBOL key, and makes sure a token filter still lets the index
@@ -191,6 +363,15 @@ var errIndexFound = errors.New("index found")
 func resolveIndex(cfg *mdreplay.Config, key string) (uint32, error) {
 	if key == "" {
 		return 0, nil
+	}
+	if n, err := strconv.ParseUint(key, 10, 32); err == nil && n > 0 {
+		// Backfilled bars made from tokens alone carry no symbol to find the
+		// index by, so it can be named by token.
+		token := uint32(n)
+		if len(cfg.Tokens) > 0 && !slices.Contains(cfg.Tokens, token) {
+			cfg.Tokens = append(cfg.Tokens, token)
+		}
+		return token, nil
 	}
 	q := store.Query{From: cfg.From, To: cfg.To}
 	var token uint32

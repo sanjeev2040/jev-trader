@@ -1,0 +1,14 @@
+[Unit]
+Description=jevtrader: early watchlist screen, before pre-open
+
+[Timer]
+# 08:30 IST: the VM starts at about 08:15 and the image is ready a few minutes
+# later. News and the previous session need no market data from today. Persistent:
+# a VM that came up late runs the missed screen at boot (screen.sh skips it once
+# it is past 09:08).
+OnCalendar=Mon..Fri *-*-* 08:30:00 Asia/Kolkata
+Persistent=true
+Unit=jevtrader-screen@early.service
+
+[Install]
+WantedBy=timers.target

@@ -7,6 +7,9 @@
 # Required environment (non-secret values from the Bicep deployment):
 #   ACR_LOGIN_SERVER  KEY_VAULT_NAME  BACKUP_ACCOUNT  BACKUP_CONTAINER
 #   WATCHLIST         JEV_MODEL
+# Optional:
+#   WATCHLIST_SCREEN  on (default) or off: screen before the session; WATCHLIST is then the fallback
+#   SCREEN_ARGS       extra flags for `jevtrader screen`
 set -euo pipefail
 
 src=$(cd "$(dirname "$0")" && pwd)
@@ -48,15 +51,17 @@ install -d -m 0750 -o 65532 -g 65532 /var/lib/jevtrader/data /var/lib/jevtrader/
   for v in ACR_LOGIN_SERVER KEY_VAULT_NAME BACKUP_ACCOUNT BACKUP_CONTAINER WATCHLIST JEV_MODEL; do
     printf '%s=%q\n' "$v" "${!v}"
   done
+  printf '%s=%q\n' WATCHLIST_SCREEN "${WATCHLIST_SCREEN:-on}"
+  printf '%s=%q\n' SCREEN_ARGS "${SCREEN_ARGS:-}"
 } > /etc/jevtrader/jevtrader.env
 chmod 0644 /etc/jevtrader/jevtrader.env
 
-for f in lib.sh prepare.sh wait-for-login.sh run.sh login.sh backup.sh; do
+for f in lib.sh prepare.sh wait-for-login.sh wait-for-watchlist.sh run.sh screen.sh login.sh backup.sh; do
   install -m 0755 "$src/$f" "/usr/local/lib/jevtrader/$f"
 done
 ln -sf /usr/local/lib/jevtrader/login.sh /usr/local/bin/jevtrader-login
 
-for u in jevtrader-prepare.service jevtrader-run.service jevtrader-backup.service jevtrader-backup.timer; do
+for u in jevtrader-prepare.service jevtrader-run.service 'jevtrader-screen@.service' jevtrader-screen-early.timer jevtrader-screen-final.timer jevtrader-backup.service jevtrader-backup.timer; do
   install -m 0644 "$src/$u" "/etc/systemd/system/$u"
 done
 systemctl daemon-reload
@@ -64,4 +69,7 @@ systemctl daemon-reload
 # first start needs an image tag and a Kite login.
 systemctl enable jevtrader-prepare.service jevtrader-run.service
 systemctl enable --now jevtrader-backup.timer
+# The screen timers fire only while the VM is up (it starts on trading mornings
+# and is deallocated at 16:00), so they need no holiday logic of their own.
+systemctl enable --now jevtrader-screen-early.timer jevtrader-screen-final.timer
 echo "provision: done"

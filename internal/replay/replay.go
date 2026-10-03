@@ -23,6 +23,12 @@ import (
 	"github.com/sanjeev2040/jev-trader/internal/snapshot"
 )
 
+// DefaultLookahead are the horizons the comparison checks calls at.
+var DefaultLookahead = []time.Duration{5 * time.Minute, 15 * time.Minute, 30 * time.Minute}
+
+// defaultBuyHoldNotional is the benchmark's spend per instrument and day.
+const defaultBuyHoldNotional = 20_000
+
 // Spec is one decider to replay the data through.
 type Spec struct {
 	// Name labels the run: jev, recorded, hold, momentum, ...
@@ -49,6 +55,10 @@ type Config struct {
 	Snapshot snapshot.Config
 	// IndexToken is the NIFTY 50 instrument; zero means none.
 	IndexToken uint32
+	// Window limits trading to a time window of each IST day. Earlier bars of
+	// the day still warm the snapshots up; the rest of the day only provides
+	// the prices the comparison looks at. The zero value is the whole day.
+	Window engine.Window
 
 	// RunPrefix starts every run id: <prefix>-<spec name>.
 	RunPrefix string
@@ -62,6 +72,17 @@ type Config struct {
 	// Horizon is how many bars ahead the report scores a BUY or SELL; zero
 	// means DefaultHorizon.
 	Horizon int
+
+	// Walkthrough adds each run's chronological walk to the report.
+	Walkthrough WalkMode
+	// Compare adds the comparison with the real market that followed.
+	Compare bool
+	// Lookahead are the horizons Compare checks each call at; empty means
+	// DefaultLookahead.
+	Lookahead []time.Duration
+	// BuyHoldNotional is what Compare's buy-and-hold benchmark spends per
+	// instrument and day; zero means 20,000.
+	BuyHoldNotional float64
 
 	Logger *slog.Logger
 }
@@ -103,7 +124,7 @@ func Run(ctx context.Context, cfg Config, specs []Spec) (*Report, error) {
 		e, err := engine.New(engine.Config{
 			RunID: runID, Mode: "replay", DeciderName: spec.Name, SourceName: cfg.SourceName,
 			Source: src, Clock: sim, Decider: spec.Decider, Broker: broker, Gate: gate, Log: cfg.Log,
-			Bars: cfg.Bars, Snapshot: cfg.Snapshot, IndexToken: cfg.IndexToken,
+			Bars: cfg.Bars, Snapshot: cfg.Snapshot, IndexToken: cfg.IndexToken, Window: cfg.Window,
 			WaitForDecisions: true, Latency: cfg.Latency, DecideTimeout: cfg.DecideTimeout,
 			BarSink: func(b domain.Bar) {
 				if b.Interval == base {
@@ -140,5 +161,36 @@ func Run(ctx context.Context, cfg Config, specs []Spec) (*Report, error) {
 	}
 	rep.Label = cfg.Label
 	rep.Notes = notes
+	win := dayWindow{Start: cfg.Window.Start, End: cfg.Window.End}
+	rep.Window = win.String()
+	if cfg.Walkthrough != WalkOff || cfg.Compare {
+		tape := newForward(prices)
+		if cfg.Walkthrough != WalkOff {
+			for _, ref := range refs {
+				w, err := BuildWalkthrough(ctx, cfg.Log, ref, cfg.Walkthrough, tape, win)
+				if err != nil {
+					return nil, err
+				}
+				rep.Walkthrough = append(rep.Walkthrough, w)
+			}
+		}
+		if cfg.Compare {
+			lookahead := cfg.Lookahead
+			if len(lookahead) == 0 {
+				lookahead = DefaultLookahead
+			}
+			notional := cfg.BuyHoldNotional
+			if notional <= 0 {
+				notional = defaultBuyHoldNotional
+			}
+			rep.Comparison, err = BuildComparison(ctx, cfg.Log, refs, rep.Runs, tape, CompareConfig{
+				Lookahead: lookahead, Window: win, IndexToken: cfg.IndexToken,
+				Notional: notional, Costs: cfg.Paper.Costs,
+			})
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
 	return rep, nil
 }

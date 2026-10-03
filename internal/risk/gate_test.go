@@ -29,9 +29,19 @@ func req(token uint32, d domain.Decision) Request {
 	return Request{CycleID: "cycle-1", Instrument: inst(token), Decision: d}
 }
 
+// testLimits are DefaultLimits with a budget large enough that the hard caps
+// (50,000 a position, 200,000 gross) bind, and size buckets of 10,000, 25,000
+// and 50,000. The budget tests below use the default budget instead.
+func testLimits() Limits {
+	l := DefaultLimits()
+	l.CapitalBudget = 250_000
+	l.SizeFraction = map[string]float64{domain.SizeS: 0.04, domain.SizeM: 0.10, domain.SizeL: 0.20}
+	return l
+}
+
 func newGate(t *testing.T, edit func(*Limits)) *Gate {
 	t.Helper()
-	l := DefaultLimits()
+	l := testLimits()
 	if edit != nil {
 		edit(&l)
 	}
@@ -55,20 +65,28 @@ func TestDefaultLimitsAreValid(t *testing.T) {
 
 func TestNewGateRejectsInvalidLimits(t *testing.T) {
 	cases := map[string]func(*Limits){
-		"missing buy threshold":    func(l *Limits) { delete(l.MinProbability, domain.ActionBuy) },
-		"threshold above one":      func(l *Limits) { l.MinProbability[domain.ActionSell] = 1.5 },
-		"missing size bucket":      func(l *Limits) { delete(l.SizeNotional, domain.SizeL) },
-		"NaN size notional":        func(l *Limits) { l.SizeNotional[domain.SizeS] = math.NaN() },
-		"zero position cap":        func(l *Limits) { l.MaxPositionNotional = 0 },
-		"gross below position cap": func(l *Limits) { l.MaxGrossNotional = l.MaxPositionNotional - 1 },
-		"zero daily loss":          func(l *Limits) { l.MaxDailyLoss = 0 },
-		"per second at Kite limit": func(l *Limits) { l.MaxOrdersPerSecond = 10 },
-		"per minute at Kite limit": func(l *Limits) { l.MaxOrdersPerMinute = 400 },
-		"per day at Kite limit":    func(l *Limits) { l.MaxOrdersPerDay = 5000 },
-		"no rejection budget":      func(l *Limits) { l.MaxConsecutiveRejections = 0 },
-		"entry window inverted":    func(l *Limits) { l.EntryStart, l.EntryEnd = l.EntryEnd, l.EntryStart },
-		"entries after square-off": func(l *Limits) { l.EntryEnd = TimeOfDay{15, 15} },
-		"invalid time of day":      func(l *Limits) { l.SquareOff = TimeOfDay{24, 0} },
+		"missing buy threshold":       func(l *Limits) { delete(l.MinProbability, domain.ActionBuy) },
+		"threshold above one":         func(l *Limits) { l.MinProbability[domain.ActionSell] = 1.5 },
+		"missing size bucket":         func(l *Limits) { delete(l.SizeFraction, domain.SizeL) },
+		"NaN size fraction":           func(l *Limits) { l.SizeFraction[domain.SizeS] = math.NaN() },
+		"size fraction above one":     func(l *Limits) { l.SizeFraction[domain.SizeM] = 1.5 },
+		"zero capital budget":         func(l *Limits) { l.CapitalBudget = 0 },
+		"NaN capital budget":          func(l *Limits) { l.CapitalBudget = math.NaN() },
+		"negative cost reserve":       func(l *Limits) { l.CostReserveRate = -0.01 },
+		"NaN cost reserve":            func(l *Limits) { l.CostReserveRate = math.NaN() },
+		"position fraction above one": func(l *Limits) { l.MaxPositionFraction = 2 },
+		"rotation margin of one":      func(l *Limits) { l.RotationMargin = 1 },
+		"negative minimum hold":       func(l *Limits) { l.RotationMinHold = -time.Second },
+		"zero position cap":           func(l *Limits) { l.MaxPositionNotional = 0 },
+		"gross below position cap":    func(l *Limits) { l.MaxGrossNotional = l.MaxPositionNotional - 1 },
+		"zero daily loss":             func(l *Limits) { l.MaxDailyLoss = 0 },
+		"per second at Kite limit":    func(l *Limits) { l.MaxOrdersPerSecond = 10 },
+		"per minute at Kite limit":    func(l *Limits) { l.MaxOrdersPerMinute = 400 },
+		"per day at Kite limit":       func(l *Limits) { l.MaxOrdersPerDay = 5000 },
+		"no rejection budget":         func(l *Limits) { l.MaxConsecutiveRejections = 0 },
+		"entry window inverted":       func(l *Limits) { l.EntryStart, l.EntryEnd = l.EntryEnd, l.EntryStart },
+		"entries after square-off":    func(l *Limits) { l.EntryEnd = TimeOfDay{15, 15} },
+		"invalid time of day":         func(l *Limits) { l.SquareOff = TimeOfDay{24, 0} },
 	}
 	for name, edit := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -88,11 +106,11 @@ func TestGateCopiesLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	l.MinProbability[domain.ActionBuy] = 0.01
-	g.Limits().SizeNotional[domain.SizeM] = 1
+	g.Limits().SizeFraction[domain.SizeM] = 1
 	if got := g.Limits().MinProbability[domain.ActionBuy]; got != 0.60 {
 		t.Fatalf("caller's map edit leaked into the gate: threshold %v", got)
 	}
-	if got := g.Limits().SizeNotional[domain.SizeM]; got != 25_000 {
+	if got := g.Limits().SizeFraction[domain.SizeM]; got != 0.10 {
 		t.Fatalf("Limits() returned a shared map: size %v", got)
 	}
 }
@@ -162,20 +180,20 @@ func TestEvaluateRefusals(t *testing.T) {
 			d:     buyM, want: ReasonNoPrice,
 		},
 		{
-			name:  "size too small",
-			setup: func(_ *Gate, b *Book) { b.Mark(1, 20_000) },
-			d:     decision(domain.ActionBuy, domain.SizeS, 0.9), want: ReasonSizeTooSmall,
+			name:  "position cap",
+			setup: func(_ *Gate, b *Book) { long(b, 1, 100, 500, 500) }, // 50,000 held: no room for a share
+			d:     decision(domain.ActionBuy, domain.SizeS, 0.9), want: ReasonPositionCap,
 		},
 		{
-			name:  "position cap",
-			setup: func(_ *Gate, b *Book) { long(b, 1, 90, 500, 500) }, // 45,000 + 10,000
+			name:  "one share over the position cap",
+			setup: func(_ *Gate, b *Book) { b.Mark(1, 60_000) },
 			d:     decision(domain.ActionBuy, domain.SizeS, 0.9), want: ReasonPositionCap,
 		},
 		{
 			name: "gross cap",
 			setup: func(_ *Gate, b *Book) {
 				for tok := uint32(10); tok < 14; tok++ {
-					long(b, tok, 96, 500, 500) // 4 × 48,000 = 192,000
+					long(b, tok, 100, 500, 500) // 4 × 50,000 = 200,000, none free
 				}
 			},
 			d: decision(domain.ActionBuy, domain.SizeS, 0.9), want: ReasonGrossCap,

@@ -1,0 +1,16 @@
+[Unit]
+Description=jevtrader: build the day's watchlist (%i)
+Requires=jevtrader-prepare.service
+After=jevtrader-prepare.service docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/run/jevtrader/secrets.env
+# The screen reads Kite candles and quotes, so it needs the operator's login too.
+ExecStartPre=/usr/local/lib/jevtrader/wait-for-login.sh
+ExecStart=/usr/local/lib/jevtrader/screen.sh %i
+ExecStop=-/usr/bin/docker stop --time 20 jevtrader-screen-%i
+# The early screen waits for the login (due before 09:00) and then needs about
+# five minutes; the final one needs two. A screen that has not finished by then
+# is no use to a run that has already started.
+TimeoutStartSec=30min

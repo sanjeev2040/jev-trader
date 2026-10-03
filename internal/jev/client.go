@@ -140,39 +140,49 @@ func (c *Client) Decide(ctx context.Context, state json.RawMessage) (domain.Deci
 	if err != nil {
 		return domain.Decision{}, &domain.DecideError{Reason: domain.ReasonError, Err: err}
 	}
+	raw, attempts, err := c.exchange(ctx, body)
+	if err != nil {
+		return domain.Decision{}, err
+	}
+	d, err := parse(raw)
+	if err != nil {
+		return domain.Decision{}, err
+	}
+	d.Latency = time.Since(start)
+	c.log.Info("jev answer", "requested_model", c.model, "model", d.Model,
+		"input_tokens", d.InputTokens, "output_tokens", d.OutputTokens, "attempts", attempts)
+	return d, nil
+}
 
+// exchange posts body and returns the raw 200 response and the number of
+// attempts it took. It retries 429 and 529 only while the call's deadline
+// still has room; every failure is a *domain.DecideError.
+func (c *Client) exchange(ctx context.Context, body []byte) (raw []byte, attempts int, err error) {
 	for attempt := 1; ; attempt++ {
 		status, raw, retryAfter, err := c.post(ctx, body)
 		if err != nil {
-			return domain.Decision{}, transportError(ctx, err)
+			return nil, attempt, transportError(ctx, err)
 		}
 		if status == http.StatusOK {
-			d, err := parse(raw)
-			if err != nil {
-				return domain.Decision{}, err
-			}
-			d.Latency = time.Since(start)
-			c.log.Info("jev answer", "requested_model", c.model, "model", d.Model,
-				"input_tokens", d.InputTokens, "output_tokens", d.OutputTokens, "attempts", attempt)
-			return d, nil
+			return raw, attempt, nil
 		}
 		derr := statusError(status, raw)
 		if status != http.StatusTooManyRequests && status != statusOverloaded {
-			return domain.Decision{}, derr
+			return nil, attempt, derr
 		}
 		if attempt >= c.maxAttempts {
-			return domain.Decision{}, derr
+			return nil, attempt, derr
 		}
 		wait := c.backoff(attempt, retryAfter)
 		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= wait {
 			// No room left for another attempt within the deadline.
-			return domain.Decision{}, derr
+			return nil, attempt, derr
 		}
 		t := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			t.Stop()
-			return domain.Decision{}, transportError(ctx, ctx.Err())
+			return nil, attempt, transportError(ctx, ctx.Err())
 		case <-t.C:
 		}
 	}

@@ -77,6 +77,15 @@ type rig struct {
 	cfg    Config
 }
 
+// testLimits are the default limits with a 200,000 budget, so a size-S entry is
+// 10,000 and the engine tests trade a few shares of a stock near 1,500.
+func testLimits() risk.Limits {
+	l := risk.DefaultLimits()
+	l.CapitalBudget = 200_000
+	l.SizeFraction[domain.SizeS] = 0.05
+	return l
+}
+
 func newRig(t *testing.T, events []marketdata.Event, d decide.Decider) *rig {
 	t.Helper()
 	log, err := decisionlog.Open(":memory:", decisionlog.Options{})
@@ -89,7 +98,7 @@ func newRig(t *testing.T, events []marketdata.Event, d decide.Decider) *rig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gate, err := risk.NewGate(risk.DefaultLimits())
+	gate, err := risk.NewGate(testLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -575,6 +584,90 @@ func TestNewValidates(t *testing.T) {
 	} {
 		c := good
 		edit(&c)
+		if _, err := New(c); err == nil {
+			t.Errorf("%s: want an error", name)
+		}
+	}
+}
+
+func barEvents(in domain.Instrument) []marketdata.Event {
+	var evs []marketdata.Event
+	for i, p := range minutePrices {
+		start := at(9, 15+i, 0)
+		b := domain.Bar{Instrument: in, Interval: time.Minute, Start: start, End: start.Add(time.Minute),
+			Open: p, High: p + 1, Low: p - 1, Close: p, Volume: 1000}
+		evs = append(evs, marketdata.Event{Bar: &b})
+	}
+	return evs
+}
+
+// TestWindowWarmsUpBeforeStartAndStopsAtEnd checks that a window of 09:20 to
+// 09:30 decides only on the ten bars inside it, still builds the snapshot from
+// the earlier warm-up bars, never moves the clock past the end, and still
+// shows the rest of the day to the bar sink.
+func TestWindowWarmsUpBeforeStartAndStopsAtEnd(t *testing.T) {
+	window := Window{Start: 9*time.Hour + 20*time.Minute, End: 9*time.Hour + 30*time.Minute}
+	for name, events := range map[string][]marketdata.Event{
+		"ticks": scenarioTicks(infy, 1),
+		"bars":  barEvents(infy),
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t, events, momentum(t))
+			r.cfg.Window = window
+			var sunk []domain.Bar
+			r.cfg.BarSink = func(b domain.Bar) { sunk = append(sunk, b) }
+			r.run(t)
+
+			cs := cyclesOf(t, r.log, "run1")
+			var first, last time.Time
+			for _, c := range cs {
+				if c.Source != decisionlog.SourceDecision {
+					continue
+				}
+				if first.IsZero() {
+					first = c.BarClose
+				}
+				last = c.BarClose
+			}
+			if first != at(9, 21, 0) || last != at(9, 30, 0) {
+				t.Errorf("decisions from %v to %v, want 09:21 to 09:30", first, last)
+			}
+			if n := len(cs); n != 10 {
+				t.Errorf("%d cycles, want 10", n)
+			}
+			// The first decision already sees the five warm-up bars.
+			var snap snapshot.Snapshot
+			if err := json.Unmarshal(cs[0].Snapshot, &snap); err != nil {
+				t.Fatal(err)
+			}
+			if snap.Session.MinutesSinceOpen != 6 || snap.Features.ReturnsPct.Bars5 == nil {
+				t.Errorf("first snapshot lacks warm-up history: %+v", snap)
+			}
+			if now := r.sim.Now(); now.After(at(9, 31, 0)) {
+				t.Errorf("clock ran to %v, past the window", now)
+			}
+			for _, e := range eventsOf(t, r.log, "run1") {
+				if e.Time.After(at(9, 30, 30)) {
+					t.Errorf("order event at %v after the window", e.Time)
+				}
+			}
+			// The sink still sees every closed bar that data produced.
+			if len(sunk) < 20 {
+				t.Errorf("sink saw %d bars, want the whole day's", len(sunk))
+			}
+		})
+	}
+}
+
+func TestWindowIsValidated(t *testing.T) {
+	r := newRig(t, nil, decide.AlwaysHold{})
+	for name, w := range map[string]Window{
+		"end before start": {Start: 10 * time.Hour, End: 9 * time.Hour},
+		"empty":            {Start: 10 * time.Hour, End: 10 * time.Hour},
+		"negative":         {Start: -time.Hour},
+	} {
+		c := r.cfg
+		c.Window = w
 		if _, err := New(c); err == nil {
 			t.Errorf("%s: want an error", name)
 		}

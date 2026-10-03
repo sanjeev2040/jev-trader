@@ -11,8 +11,15 @@ import (
 // Book is the risk state the engine owns: positions, last prices, orders in
 // flight, the day's realized PnL, the order-rate window and the kill switch.
 // It is not safe for concurrent use; the engine loop is its only user.
+//
+// Every position in the book is one the bot opened itself, from its own fills.
+// A holding or position the bot did not open is registered with SetForeign:
+// the book keeps it out of the capital budget and the gate refuses every order
+// in it, so the bot never trades, sells or flattens what is not its own.
 type Book struct {
 	positions map[uint32]domain.Position
+	foreign   map[uint32]domain.Position // holdings and positions the bot did not open; never traded
+	entries   map[uint32]entry           // how and when the bot opened each position
 	marks     map[uint32]float64
 	inflight  map[uint32]domain.OrderIntent // unfilled remainder of each in-flight order
 
@@ -26,10 +33,18 @@ type Book struct {
 	killReason Reason
 }
 
+// entry records when a position was opened and how sure the decider was.
+type entry struct {
+	probability float64
+	at          time.Time
+}
+
 // NewBook returns an empty book.
 func NewBook() *Book {
 	return &Book{
 		positions: map[uint32]domain.Position{},
+		foreign:   map[uint32]domain.Position{},
+		entries:   map[uint32]entry{},
 		marks:     map[uint32]float64{},
 		inflight:  map[uint32]domain.OrderIntent{},
 	}
@@ -42,14 +57,34 @@ func (b *Book) Mark(token uint32, price float64) {
 	}
 }
 
-// SetPosition replaces the position in an instrument, for example when
-// reconciling with the broker at startup. It does not touch realized PnL.
+// SetPosition replaces the bot's own position in an instrument, for example
+// when restoring what the bot itself opened earlier in the day from its
+// journal. It does not touch realized PnL. It must never be given a holding
+// or position the bot did not open: that is SetForeign.
 func (b *Book) SetPosition(p domain.Position) {
 	if p.Quantity == 0 {
 		delete(b.positions, p.Instrument.Token)
 		return
 	}
 	b.positions[p.Instrument.Token] = p
+}
+
+// SetForeign registers a holding or position the bot did not open, such as a
+// pre-existing Zerodha holding. The bot leaves it alone: it does not count
+// against the capital budget, the gate refuses every order in the instrument
+// and no exit or rotation touches it. A zero quantity removes it.
+func (b *Book) SetForeign(p domain.Position) {
+	if p.Quantity == 0 {
+		delete(b.foreign, p.Instrument.Token)
+		return
+	}
+	b.foreign[p.Instrument.Token] = p
+}
+
+// IsForeign reports whether the instrument holds something the bot did not open.
+func (b *Book) IsForeign(token uint32) bool {
+	_, ok := b.foreign[token]
+	return ok
 }
 
 // Position returns the open position in an instrument.
@@ -112,7 +147,12 @@ func (b *Book) ApplyFill(f domain.Fill) {
 
 // Settle clears the order in flight for an instrument. Call it when the order
 // reaches a terminal state: complete, rejected or cancelled.
-func (b *Book) Settle(token uint32) { delete(b.inflight, token) }
+func (b *Book) Settle(token uint32) {
+	delete(b.inflight, token)
+	if _, open := b.positions[token]; !open {
+		delete(b.entries, token) // an entry that never filled, or a position now closed
+	}
+}
 
 // record notes an approved order as in flight and against the rate window.
 func (b *Book) record(in domain.OrderIntent, now time.Time) {
@@ -198,30 +238,35 @@ func (b *Book) pruneOrders(now time.Time) {
 	b.orderTimes = b.orderTimes[i:]
 }
 
-// exposure returns |quantity| × price of an instrument's position plus its
-// order in flight, if that order adds to the position.
-func (b *Book) exposure(token uint32) float64 {
-	price := b.price(token)
-	q := abs(b.positions[token].Quantity)
-	if in, ok := b.inflight[token]; ok && !in.ReduceOnly {
-		q += in.Quantity
+// noteEntry records the decision that opened or added to a position. The
+// first entry sets the time and later ones keep the lowest probability, so a
+// position is only as strongly held as its weakest entry.
+func (b *Book) noteEntry(token uint32, probability float64, now time.Time) {
+	if e, ok := b.entries[token]; ok {
+		e.probability = min(e.probability, probability)
+		b.entries[token] = e
+		return
 	}
-	return float64(q) * price
+	b.entries[token] = entry{probability: probability, at: now}
 }
 
-func (b *Book) grossExposure() float64 {
-	seen := map[uint32]bool{}
-	var g float64
-	for token := range b.positions {
-		seen[token] = true
-		g += b.exposure(token)
-	}
-	for token := range b.inflight {
-		if !seen[token] {
-			g += b.exposure(token)
+// Committed returns the capital at work, in rupees: the cost of the
+// positions the bot opened plus its orders in flight that add to a position.
+// Foreign holdings are not counted.
+func (b *Book) Committed() float64 {
+	var c float64
+	for token, p := range b.positions {
+		c += float64(abs(p.Quantity)) * p.AvgPrice
+		if in, ok := b.inflight[token]; ok && !in.ReduceOnly {
+			c += float64(in.Quantity) * in.RefPrice
 		}
 	}
-	return g
+	for token, in := range b.inflight {
+		if _, ok := b.positions[token]; !ok && !in.ReduceOnly {
+			c += float64(in.Quantity) * in.RefPrice
+		}
+	}
+	return c
 }
 
 // price returns the last mark, falling back to the position's average price.

@@ -49,11 +49,23 @@ param backupContainerName string = 'backups'
 @description('GitHub repository (owner/name) whose workflows may log in through OIDC.')
 param githubRepo string = 'sanjeev2040/jev-trader'
 
+@description('Numeric GitHub ID of the repository owner (gh api users/OWNER --jq .id). The OIDC subject carries it.')
+param githubOwnerId string = '22476366'
+
+@description('Numeric GitHub ID of the repository (gh api repos/OWNER/REPO --jq .id). The OIDC subject carries it.')
+param githubRepoId string = '1401087829'
+
 @description('Instruments `jevtrader run` trades, comma separated EXCHANGE:SYMBOL keys, for example NSE:INFY,NSE:TCS.')
 param watchlist string
 
 @description('Pinned Jev model id passed to `jevtrader run --model`.')
 param jevModel string = 'jev-1.13.0'
+
+@description('Screen for the day\'s mid and small-cap watchlist before the session (`jevtrader screen`, 08:30 and 09:08 IST). `watchlist` is then only the fallback when the screen produced nothing.')
+param screenEnabled bool = true
+
+@description('Extra flags for `jevtrader screen` (weights, filters, news sources; `jevtrader screen -h`), for example `--top 6 --w-news 0.5`.')
+param screenArgs string = ''
 
 @description('Email address for the action group and the budget alerts.')
 param alertEmail string
@@ -271,24 +283,31 @@ var payload = [
   { name: 'lib.sh', b64: loadFileAsBase64('../deploy/vm/lib.sh') }
   { name: 'prepare.sh', b64: loadFileAsBase64('../deploy/vm/prepare.sh') }
   { name: 'wait-for-login.sh', b64: loadFileAsBase64('../deploy/vm/wait-for-login.sh') }
+  { name: 'wait-for-watchlist.sh', b64: loadFileAsBase64('../deploy/vm/wait-for-watchlist.sh') }
   { name: 'run.sh', b64: loadFileAsBase64('../deploy/vm/run.sh') }
+  { name: 'screen.sh', b64: loadFileAsBase64('../deploy/vm/screen.sh') }
   { name: 'login.sh', b64: loadFileAsBase64('../deploy/vm/login.sh') }
   { name: 'backup.sh', b64: loadFileAsBase64('../deploy/vm/backup.sh') }
   { name: 'provision.sh', b64: loadFileAsBase64('../deploy/vm/provision.sh') }
   { name: 'jevtrader-prepare.service', b64: loadFileAsBase64('../deploy/vm/jevtrader-prepare.service') }
   { name: 'jevtrader-run.service', b64: loadFileAsBase64('../deploy/vm/jevtrader-run.service') }
+  { name: 'jevtrader-screen@.service', b64: loadFileAsBase64('../deploy/vm/jevtrader-screen@.service') }
+  { name: 'jevtrader-screen-early.timer', b64: loadFileAsBase64('../deploy/vm/jevtrader-screen-early.timer') }
+  { name: 'jevtrader-screen-final.timer', b64: loadFileAsBase64('../deploy/vm/jevtrader-screen-final.timer') }
   { name: 'jevtrader-backup.service', b64: loadFileAsBase64('../deploy/vm/jevtrader-backup.service') }
   { name: 'jevtrader-backup.timer', b64: loadFileAsBase64('../deploy/vm/jevtrader-backup.timer') }
 ]
 var unpack = join(map(payload, f => 'echo ${f.b64} | base64 -d > "$d/${f.name}"'), '\n')
 // Single quotes are dropped so a value cannot break out of its quoting.
 var settings = join([
-  'export ACR_LOGIN_SERVER=\'${acr.name}.${environment().suffixes.acrLoginServer}\''
+  'export ACR_LOGIN_SERVER=\'${acr.properties.loginServer}\''
   'export KEY_VAULT_NAME=\'${kv.name}\''
   'export BACKUP_ACCOUNT=\'${storage.name}\''
   'export BACKUP_CONTAINER=\'${backupContainerName}\''
   'export WATCHLIST=\'${replace(watchlist, '\'', '')}\''
   'export JEV_MODEL=\'${replace(jevModel, '\'', '')}\''
+  'export WATCHLIST_SCREEN=\'${screenEnabled ? 'on' : 'off'}\''
+  'export SCREEN_ARGS=\'${replace(screenArgs, '\'', '')}\''
 ], '\n')
 var provisionScript = join([
   '#!/bin/bash'
@@ -319,6 +338,11 @@ resource provision 'Microsoft.Compute/virtualMachines/extensions@2024-03-01' = {
 // Two identities, so the schedule cannot deploy and the deploy cannot start or
 // stop the VM. Subjects name GitHub *environments*, not branches: the cron runs
 // on the default branch (dev) while releases come from main.
+// GitHub puts the numeric owner and repository IDs in the OIDC subject
+// (repo:OWNER@OWNER_ID/REPO@REPO_ID:environment:ENV), so name-only subjects never match.
+var githubRepoParts = split(githubRepo, '/')
+var githubSubjectPrefix = 'repo:${githubRepoParts[0]}@${githubOwnerId}/${githubRepoParts[1]}@${githubRepoId}'
+
 resource deployIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: 'id-gh-jevtrader-deploy'
   location: location
@@ -326,10 +350,10 @@ resource deployIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-0
 
 resource deployFederation 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = {
   parent: deployIdentity
-  name: 'github-production'
+  name: 'github-production-ids'
   properties: {
     issuer: 'https://token.actions.githubusercontent.com'
-    subject: 'repo:${githubRepo}:environment:production'
+    subject: '${githubSubjectPrefix}:environment:production'
     audiences: ['api://AzureADTokenExchange']
   }
 }
@@ -341,10 +365,10 @@ resource scheduleIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023
 
 resource scheduleFederation 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = {
   parent: scheduleIdentity
-  name: 'github-market-hours'
+  name: 'github-market-hours-ids'
   properties: {
     issuer: 'https://token.actions.githubusercontent.com'
-    subject: 'repo:${githubRepo}:environment:market-hours'
+    subject: '${githubSubjectPrefix}:environment:market-hours'
     audiences: ['api://AzureADTokenExchange']
   }
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"reflect"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/sanjeev2040/jev-trader/internal/decide"
 	"github.com/sanjeev2040/jev-trader/internal/decisionlog"
 	"github.com/sanjeev2040/jev-trader/internal/domain"
+	"github.com/sanjeev2040/jev-trader/internal/engine"
 	"github.com/sanjeev2040/jev-trader/internal/marketdata"
 	mdreplay "github.com/sanjeev2040/jev-trader/internal/marketdata/replay"
 	"github.com/sanjeev2040/jev-trader/internal/orders/paper"
@@ -339,5 +341,290 @@ func TestScoreLooksAheadOnlyForEvaluation(t *testing.T) {
 	c.Price = 0
 	if _, ok := f.score(c, time.Minute, 2); ok {
 		t.Error("a call with no price was scored")
+	}
+}
+
+func windowConfig(t *testing.T, root string, log *decisionlog.Log) Config {
+	t.Helper()
+	cfg := config(t, root, log)
+	cfg.Window = engine.Window{Start: 9*time.Hour + 20*time.Minute, End: 9*time.Hour + 30*time.Minute}
+	cfg.Walkthrough = WalkAll
+	cfg.Compare = true
+	return cfg
+}
+
+func runWindow(t *testing.T) *Report {
+	t.Helper()
+	rep, err := Run(bg, windowConfig(t, writeFixture(t), openLog(t)), []Spec{
+		{Name: "hold", Decider: decide.AlwaysHold{}},
+		{Name: "momentum", Decider: momentum(t)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rep
+}
+
+func walkOf(rep *Report, decider string) RunWalk {
+	for _, w := range rep.Walkthrough {
+		if w.Decider == decider {
+			return w
+		}
+	}
+	return RunWalk{}
+}
+
+// TestWindowedWalkthrough follows the momentum run through 09:20-09:30: every
+// row sits in the window, the first decision already has warm-up features,
+// the BUY is approved and filled, and the instrument's PnL ties to the run's.
+func TestWindowedWalkthrough(t *testing.T) {
+	rep := runWindow(t)
+	if rep.Window != "09:20-09:30 IST" {
+		t.Errorf("window = %q", rep.Window)
+	}
+	if hold := byDecider(rep, "hold"); hold.Cycles != 10 {
+		t.Errorf("hold decided %d times in a 10-minute window, want 10", hold.Cycles)
+	}
+
+	w := walkOf(rep, "momentum")
+	if len(w.Instruments) != 1 || w.Instruments[0].Instrument != "NSE:INFY" || w.Instruments[0].Token != infy.Token {
+		t.Fatalf("instruments = %+v (the index must not be traded)", w.Instruments)
+	}
+	iw := w.Instruments[0]
+	if iw.Decisions != 10 || iw.Buys+iw.Sells+iw.Holds != 10 || iw.Fills != 2 || iw.Position != 0 {
+		t.Errorf("instrument summary = %+v", iw)
+	}
+	mom := byDecider(rep, "momentum")
+	if math.Abs(iw.NetPnL-round2(mom.NetPnL)) > 0.011 {
+		t.Errorf("instrument PnL %.2f != run PnL %.2f", iw.NetPnL, mom.NetPnL)
+	}
+
+	open, closeAt := day.Add(9*time.Hour+20*time.Minute), day.Add(9*time.Hour+31*time.Minute)
+	var buy, fill *WalkRow
+	for i, r := range iw.Rows {
+		if r.Time.Before(open) || r.Time.After(closeAt) {
+			t.Errorf("row at %s is outside the window", r.Time.In(risk.IST))
+		}
+		if i > 0 && r.Time.Before(iw.Rows[i-1].Time) {
+			t.Errorf("rows out of order at %d", i)
+		}
+		switch {
+		case r.Kind == RowDecision && r.Action == "BUY" && r.Order != nil && buy == nil:
+			buy = &iw.Rows[i]
+		case r.Kind == RowFill && fill == nil:
+			fill = &iw.Rows[i]
+		}
+	}
+	if buy == nil || fill == nil {
+		t.Fatalf("no approved BUY (%v) or fill (%v) in the walk", buy, fill)
+	}
+	if buy.Verdict != "approved" || buy.Order.Side != "BUY" || buy.Order.Quantity == 0 || buy.Probability <= 0 {
+		t.Errorf("BUY row = %+v", buy)
+	}
+	f := buy.Features
+	if f == nil || f.MinutesSinceOpen != 6 || f.Return5Pct == nil || f.IndexSessionPct == nil || f.VWAPDistPct == nil {
+		t.Errorf("BUY features = %+v; want warm-up bars to count", f)
+	}
+	if fill.Side != "BUY" || fill.Quantity != buy.Order.Quantity || fill.Price <= 0 || fill.Position != fill.Quantity || fill.Charges <= 0 || fill.PnL >= 0 {
+		t.Errorf("fill row = %+v", fill)
+	}
+	// A refused call carries the gate's reason.
+	var refused bool
+	for _, r := range iw.Rows {
+		if r.Kind == RowDecision && r.Verdict == "order_in_flight" && r.VerdictDetail != "" {
+			refused = true
+		}
+	}
+	if !refused {
+		t.Error("no refused decision with its reason in the walk")
+	}
+
+	// "actions" leaves out the HOLD rows of the always-HOLD run only.
+	cfg := windowConfig(t, writeFixture(t), openLog(t))
+	cfg.Walkthrough = WalkActions
+	rep2, err := Run(bg, cfg, []Spec{{Name: "hold", Decider: decide.AlwaysHold{}}, {Name: "momentum", Decider: momentum(t)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hw := walkOf(rep2, "hold").Instruments[0]
+	if len(hw.Rows) != 0 || hw.Holds != 10 {
+		t.Errorf("hold walk under actions = %d rows, %d holds", len(hw.Rows), hw.Holds)
+	}
+	if mw := walkOf(rep2, "momentum").Instruments[0]; len(mw.Rows) != len(iw.Rows) {
+		t.Errorf("momentum has no HOLDs, so %d rows should stay %d", len(mw.Rows), len(iw.Rows))
+	}
+}
+
+// TestComparisonWithTheMarketThatFollowed checks the real prices after each
+// call (the data continues past the window), buy-and-hold, and the baselines.
+func TestComparisonWithTheMarketThatFollowed(t *testing.T) {
+	rep := runWindow(t)
+	cmp := rep.Comparison
+	if cmp == nil || fmt.Sprint(cmp.LookaheadMinutes) != "[5 15 30]" {
+		t.Fatalf("comparison = %+v", cmp)
+	}
+	var first *CallOutcome
+	for i, c := range cmp.Calls {
+		if c.Decider == "hold" {
+			t.Fatalf("a HOLD is not a call: %+v", c)
+		}
+		if i == 0 {
+			first = &cmp.Calls[0]
+		}
+	}
+	if first == nil {
+		t.Fatal("no calls")
+	}
+	// The 09:21 BUY: the 09:20 bar closed at 1515. Five minutes on, the 09:25
+	// bar closed at 1523; the window ended at 1505 and the data's last bar
+	// closed at 1495. The data stops before 15 and 30 minutes pass.
+	labels := []string{"+5m", "+15m", "+30m", "window end", "day close"}
+	if first.Action != "BUY" || first.Price != 1515 || len(first.Outcomes) != len(labels) || !first.Executed || first.Verdict != "approved" {
+		t.Fatalf("first call = %+v", first)
+	}
+	for i, o := range first.Outcomes {
+		if o.Label != labels[i] {
+			t.Errorf("outcome %d = %q, want %q", i, o.Label, labels[i])
+		}
+	}
+	want := map[string]float64{"+5m": 1523, "window end": 1505, "day close": 1495}
+	for _, o := range first.Outcomes {
+		w, scored := want[o.Label]
+		if scored != (o.Price != nil) || (scored && (*o.Price != w || math.Abs(*o.MovePct-(w-1515)/1515*100) > 1e-9)) {
+			t.Errorf("outcome %+v, want price %v (scored: %v)", o, w, scored)
+		}
+	}
+	// A SELL is right when the price falls.
+	for _, c := range cmp.Calls {
+		if c.Action == "SELL" && c.Time.Equal(day.Add(9*time.Hour+28*time.Minute)) {
+			if m := c.Outcomes[len(c.Outcomes)-1].MovePct; m == nil || *m <= 0 {
+				t.Errorf("SELL at 09:28 (price %v) closed at %v: move %v, want positive", c.Price, 1495, m)
+			}
+		}
+	}
+	var fiveMinute *CallSummary
+	for i, s := range cmp.Summary {
+		if s.Label == "+5m" {
+			fiveMinute = &cmp.Summary[i]
+		}
+	}
+	if fiveMinute == nil || fiveMinute.Calls != 10 || fiveMinute.Scored != 10 || fiveMinute.Right != 5 {
+		t.Errorf("+5m summary = %+v", fiveMinute)
+	}
+
+	// Buy-and-hold buys 13 INFY at the 09:20 bar's open and holds to 09:30.
+	bh := cmp.BuyHold
+	if len(bh.Rows) != 1 || bh.Notional != 20_000 {
+		t.Fatalf("buy-and-hold = %+v", bh)
+	}
+	row := bh.Rows[0]
+	if row.Quantity != 13 || row.StartPrice != 1515 || row.EndPrice != 1505 || row.Gross != -130 || row.DayClose == nil || *row.DayClose != 1495 {
+		t.Errorf("buy-and-hold row = %+v", row)
+	}
+	if row.Costs <= 0 || math.Abs(row.Net-(row.Gross-row.Costs)) > 0.011 || bh.Net != row.Net {
+		t.Errorf("buy-and-hold costs/net = %+v", bh)
+	}
+
+	// Strategy against the benchmarks.
+	var holdRun, momRun RunPnL
+	for _, p := range cmp.PnL {
+		switch p.Decider {
+		case "hold":
+			holdRun = p
+		case "momentum":
+			momRun = p
+		}
+	}
+	if !holdRun.Baseline || !momRun.Baseline || holdRun.NetPnL != 0 {
+		t.Errorf("pnl rows = %+v / %+v", holdRun, momRun)
+	}
+	if momRun.VsHold == nil || *momRun.VsHold != round2(momRun.NetPnL) || momRun.VsMomentum == nil || *momRun.VsMomentum != 0 ||
+		math.Abs(momRun.VsBuyHold-round2(momRun.NetPnL-bh.Net)) > 0.011 {
+		t.Errorf("momentum vs benchmarks = %+v", momRun)
+	}
+}
+
+func TestReportTextAndJSONCarryWalkthroughAndComparison(t *testing.T) {
+	rep := runWindow(t)
+	var text bytes.Buffer
+	if err := rep.WriteText(&text); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Trading window: 09:20-09:30 IST", "Walkthrough: momentum (bt-momentum)", "NSE:INFY: 10 decisions",
+		"DECIDE BUY  p=0.65", "FILL   BUY", "gate order_in_flight", "Comparison with the real market",
+		"BUY/SELL calls, bt-momentum", "window end", "day close", "Buy-and-hold benchmark", "vs buy-and-hold",
+	} {
+		if !strings.Contains(text.String(), want) {
+			t.Errorf("text report lacks %q", want)
+		}
+	}
+
+	var js bytes.Buffer
+	if err := rep.WriteJSON(&js); err != nil {
+		t.Fatal(err)
+	}
+	var back Report
+	if err := json.Unmarshal(js.Bytes(), &back); err != nil {
+		t.Fatal(err)
+	}
+	if len(back.Walkthrough) != 2 || back.Comparison == nil || len(back.Comparison.Calls) == 0 || len(back.Comparison.PnL) != 2 || back.Window == "" {
+		t.Errorf("JSON report lost the walkthrough or comparison: %s", js.String())
+	}
+}
+
+// TestReportWithoutTheNewOptionsIsUnchanged keeps the existing output exactly:
+// no window line, no walkthrough, no comparison.
+func TestReportWithoutTheNewOptionsIsUnchanged(t *testing.T) {
+	rep, err := Run(bg, config(t, writeFixture(t), openLog(t)), []Spec{{Name: "hold", Decider: decide.AlwaysHold{}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text, js bytes.Buffer
+	_ = rep.WriteText(&text)
+	_ = rep.WriteJSON(&js)
+	for _, banned := range []string{"Trading window", "Walkthrough", "Comparison with"} {
+		if strings.Contains(text.String(), banned) {
+			t.Errorf("text report has %q", banned)
+		}
+	}
+	for _, banned := range []string{`"window"`, `"walkthrough"`, `"comparison"`} {
+		if strings.Contains(js.String(), banned) {
+			t.Errorf("JSON report has %s", banned)
+		}
+	}
+}
+
+func TestPriceLookups(t *testing.T) {
+	at := func(m int) time.Time { return day.Add(9*time.Hour + time.Duration(m)*time.Minute) }
+	bar := func(endMin int, close float64) domain.Bar {
+		return domain.Bar{Instrument: infy, Interval: time.Minute, Start: at(endMin - 1), End: at(endMin), Close: close}
+	}
+	// 09:20 has no bar: a quiet minute.
+	tape := newForward([]domain.Bar{bar(16, 10), bar(17, 11), bar(19, 13), bar(21, 15)})
+	for _, tc := range []struct {
+		target int
+		want   float64
+		ok     bool
+	}{
+		{17, 11, true}, // an exact bar
+		{20, 13, true}, // a quiet minute carries the last close forward
+		{21, 15, true}, // the last bar
+		{22, 0, false}, // beyond the data
+		{16, 10, true}, // the call's own bar
+	} {
+		got, ok := tape.priceAt(infy.Token, at(16), at(tc.target))
+		if ok != tc.ok || got != tc.want {
+			t.Errorf("priceAt(%d) = %v, %v; want %v, %v", tc.target, got, ok, tc.want, tc.ok)
+		}
+	}
+	if p, ok := tape.closeAt(infy.Token, at(18)); !ok || p != 11 {
+		t.Errorf("closeAt(18) = %v, %v", p, ok)
+	}
+	if _, ok := tape.closeAt(infy.Token, at(10)); ok {
+		t.Error("closeAt before the first bar should be unknown")
+	}
+	if got := dayClose(tape, infy.Token, at(16)); !got.Equal(at(21)) {
+		t.Errorf("dayClose = %v", got)
 	}
 }
