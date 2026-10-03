@@ -408,7 +408,7 @@ func (e *Engine) onTick(ctx context.Context, t domain.Tick) error {
 	if e.cfg.TickSink != nil {
 		e.cfg.TickSink(t)
 	}
-	e.book.Mark(t.InstrumentToken, t.LastPrice)
+	e.book.MarkAt(t.InstrumentToken, t.LastPrice, ts)
 	// Orders placed on earlier events see this tick first, so a decision made
 	// on it can never fill on it.
 	if e.feed != nil {
@@ -434,7 +434,7 @@ func (e *Engine) onBar(ctx context.Context, b domain.Bar) error {
 		return e.onBarClosed(ctx, b) // the sink only; see Window
 	}
 	e.moveClock(b.End)
-	e.book.Mark(b.Instrument.Token, b.Close)
+	e.book.MarkBar(b)
 	if e.feed != nil {
 		e.feed.OnBar(b)
 		if err := e.drain(ctx); err != nil {

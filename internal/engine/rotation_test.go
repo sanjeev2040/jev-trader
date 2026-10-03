@@ -179,6 +179,7 @@ func TestFullBudgetWithoutAStrongerBuyIsRefused(t *testing.T) {
 func mustGate(t *testing.T, edit func(*risk.Limits)) *risk.Gate {
 	t.Helper()
 	l := risk.DefaultLimits()
+	l.MinHold, l.ReentryCooldown, l.CostAware = 0, 0, false // these tests are about rotation, not churn
 	edit(&l)
 	g, err := risk.NewGate(l)
 	if err != nil {

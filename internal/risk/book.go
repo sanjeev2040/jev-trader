@@ -20,6 +20,8 @@ type Book struct {
 	positions map[uint32]domain.Position
 	foreign   map[uint32]domain.Position // holdings and positions the bot did not open; never traded
 	entries   map[uint32]entry           // how and when the bot opened each position
+	exits     map[uint32]time.Time       // when the bot last approved an exit in each instrument
+	ranges    map[uint32][]rangeBucket   // recent price range per instrument, one bucket a minute
 	marks     map[uint32]float64
 	inflight  map[uint32]domain.OrderIntent // unfilled remainder of each in-flight order
 
@@ -39,12 +41,24 @@ type entry struct {
 	at          time.Time
 }
 
+// rangeBucket is the high and low of the prices seen in one minute.
+type rangeBucket struct {
+	minute   time.Time
+	high, lo float64
+}
+
+// rangeKeep is how long the book keeps price history for the recent range;
+// Limits.RangeWindow may not exceed it.
+const rangeKeep = 2 * time.Hour
+
 // NewBook returns an empty book.
 func NewBook() *Book {
 	return &Book{
 		positions: map[uint32]domain.Position{},
 		foreign:   map[uint32]domain.Position{},
 		entries:   map[uint32]entry{},
+		exits:     map[uint32]time.Time{},
+		ranges:    map[uint32][]rangeBucket{},
 		marks:     map[uint32]float64{},
 		inflight:  map[uint32]domain.OrderIntent{},
 	}
@@ -56,6 +70,72 @@ func (b *Book) Mark(token uint32, price float64) {
 		b.marks[token] = price
 	}
 }
+
+// MarkAt records the last traded price of an instrument at time t, as Mark
+// does, and also feeds the instrument's recent price range, which the gate's
+// cost-aware entry check reads. The engine marks every tick this way.
+func (b *Book) MarkAt(token uint32, price float64, t time.Time) {
+	b.Mark(token, price)
+	if price > 0 && !math.IsInf(price, 0) {
+		b.span(token, price, price, t)
+	}
+}
+
+// MarkBar records a closed bar: its close as the last price and its high and
+// low in the instrument's recent price range, at the bar's end.
+func (b *Book) MarkBar(bar domain.Bar) {
+	token := bar.Instrument.Token
+	b.Mark(token, bar.Close)
+	if bar.High > 0 && bar.Low > 0 && bar.High >= bar.Low && !math.IsInf(bar.High, 0) {
+		b.span(token, bar.High, bar.Low, bar.End)
+	}
+}
+
+// span folds a high and a low seen at time t into the minute buckets.
+func (b *Book) span(token uint32, high, low float64, t time.Time) {
+	minute := t.Truncate(time.Minute)
+	bs := b.ranges[token]
+	i := len(bs)
+	for i > 0 && bs[i-1].minute.After(minute) { // marks are nearly in order; find the bucket from the end
+		i--
+	}
+	switch {
+	case i > 0 && bs[i-1].minute.Equal(minute):
+		bs[i-1].high = max(bs[i-1].high, high)
+		bs[i-1].lo = min(bs[i-1].lo, low)
+	default:
+		bs = append(bs, rangeBucket{})
+		copy(bs[i+1:], bs[i:])
+		bs[i] = rangeBucket{minute: minute, high: high, lo: low}
+	}
+	cut := 0
+	for cut < len(bs) && bs[cut].minute.Before(minute.Add(-rangeKeep)) {
+		cut++
+	}
+	b.ranges[token] = bs[cut:]
+}
+
+// recentRange returns the high minus the low of the instrument's prices in the
+// window ending at now, and false if the book has seen none in it.
+func (b *Book) recentRange(token uint32, now time.Time, window time.Duration) (float64, bool) {
+	from := now.Add(-window)
+	var high, low float64
+	var seen bool
+	for _, bk := range b.ranges[token] {
+		if bk.minute.Add(time.Minute).Before(from) || bk.minute.After(now) {
+			continue
+		}
+		if !seen {
+			high, low, seen = bk.high, bk.lo, true
+			continue
+		}
+		high, low = max(high, bk.high), min(low, bk.lo)
+	}
+	return high - low, seen
+}
+
+// noteExit records that an exit was approved in the instrument at now.
+func (b *Book) noteExit(token uint32, now time.Time) { b.exits[token] = now }
 
 // SetPosition replaces the bot's own position in an instrument, for example
 // when restoring what the bot itself opened earlier in the day from its
