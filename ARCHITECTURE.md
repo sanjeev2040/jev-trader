@@ -126,7 +126,7 @@ If nobody logs in, nothing trades and the VM is still deallocated at 16:00. The 
 
 ## The decision loop
 
-Every closed bar of a watched instrument starts one decision cycle. A single goroutine owns all mutable trading state; deciders run in their own goroutines and return their answers on a channel.
+Every closed bar of a watched instrument that falls on the decision cadence (every fifth minute by default, `--decide-every`) starts one decision cycle. A single goroutine owns all mutable trading state; deciders run in their own goroutines and return their answers on a channel.
 
 ```mermaid
 flowchart TD
@@ -142,7 +142,7 @@ flowchart TD
     subgraph G["risk gate: first failing check wins"]
         direction TB
         G1["kill switch, session window, daily loss limit"]
-        G2["probability threshold, order in flight, no shorts"]
+        G2["probability threshold, entry confirmation,<br/>minimum hold, cooldown, order in flight, no shorts"]
         G3["position cap, gross cap, capital budget"]
         G4["order rate and daily order budget"]
         G1 --> G2 --> G3 --> G4
@@ -162,6 +162,7 @@ Points the diagram compresses:
 
 - **The log comes before the order.** The cycle row (snapshot, answer, verdict, intent) is written before any order is submitted; an `order_events` row follows each broker update.
 - **Risk exits do not wait for a decider.** Square-off, the daily loss limit and the kill switch produce exits that are logged as cycles of their own.
+- **Trade for hours.** The defaults hold a position for at least an hour, wait an hour before re-entering a stock, and enter only on a call of at least 0.70 repeated on two consecutive decisions, five minutes apart. Stops, the square-off and the kill switch are never delayed by any of it. See [docs/run-and-replay.md](docs/run-and-replay.md#trading-for-hours).
 - **The default session limits** (`risk.DefaultLimits`): no entries before 09:20 or at and after 15:00, and every position flattened from 15:10.
 - **Budget and sizing.** The bot trades within a total rupee budget (₹25,000 unless configured) that the gate enforces on every order, sized in buckets S, M and L. See [Secrets and configuration](#secrets-and-configuration) for where the number comes from and [docs/run-and-replay.md](docs/run-and-replay.md#capital-budget) for the rules.
 - **Rotation.** When the budget is full, the gate may sell one of the bot's *own* positions to make room. The entry waits up to two minutes for that sale to fill, then goes back to the gate; a stale one is logged as `rotation_abandoned`. Positions the bot did not open are never sold.

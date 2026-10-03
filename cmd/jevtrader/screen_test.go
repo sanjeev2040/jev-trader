@@ -350,7 +350,7 @@ func TestReplayWithAWatchlistFile(t *testing.T) {
 		return p
 	}
 	logPath := filepath.Join(t.TempDir(), "d.db")
-	base := []string{"replay", "--data-dir", root, "--log", logPath, "--deciders", "hold", "--format", "json"}
+	base := append([]string{"replay", "--data-dir", root, "--log", logPath, "--deciders", "hold", "--format", "json"}, minuteRules...)
 
 	t.Run("limits the replay to the listed instruments and skips the unstored", func(t *testing.T) {
 		p := write("a.json", "2026-10-05", "NSE:INFY", "NSE:GONE")

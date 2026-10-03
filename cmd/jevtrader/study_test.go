@@ -179,6 +179,7 @@ func newTestReplayer(t *testing.T, root string, jevURL string) (*studyReplayer, 
 	return &studyReplayer{
 		o: studyOptions{
 			model: "jev-1.13.0", jevURL: jevURL, capital: config.Capital{Amount: 25000, Source: "test"},
+			rules:   &tradingRules{minHold: 5 * time.Minute, cooldown: 10 * time.Minute, entryMinProb: 0.6, decideEvery: time.Minute},
 			window:  engine.Window{Start: 9*time.Hour + 15*time.Minute, End: 9*time.Hour + 25*time.Minute},
 			latency: time.Second, decideTimeout: 10 * time.Second, horizon: 5, lookahead: []time.Duration{5 * time.Minute},
 		},
@@ -288,15 +289,15 @@ func TestStudyRunsEndToEndOnFixtures(t *testing.T) {
 	// Monday to Friday, less Wednesday the 30th, which Kite has no candles for.
 	for _, want := range []string{
 		"# Picker backtest, 2026-09-28 to 2026-10-02", "4 trading day(s) studied, 1 skipped", "2026-09-30: Kite has no candles",
-		"| jev | picks |", "| momentum | random |", "## Jev token cost", "09:15–09:25 IST",
+		"| jev | picks |", "| momentum | random |", "## Jev token cost", "09:15–09:25 IST", "decide every 5m0s; entry needs p >= 0.70 on 2 consecutive decisions; min hold 1h0m0s",
 	} {
 		if !strings.Contains(md, want) {
 			t.Errorf("report lacks %q", want)
 		}
 	}
-	// 4 days x 3 names x 10 minutes of Jev decisions.
-	if int(hits.Load()) != 120 {
-		t.Errorf("%d Jev requests, want 120", hits.Load())
+	// 4 days x 3 names x 2 decisions: the default 5-minute cadence asks at 09:20 and 09:25, not every minute.
+	if int(hits.Load()) != 24 {
+		t.Errorf("%d Jev requests, want 24", hits.Load())
 	}
 	var js map[string]any
 	raw, err := os.ReadFile(strings.TrimSuffix(report, ".md") + ".json")
@@ -314,7 +315,7 @@ func TestStudyRunsEndToEndOnFixtures(t *testing.T) {
 		t.Fatalf("rerun exit %d: %s", code, stderr.String())
 	}
 	// Instruments Kite answered empty are asked again, since the cause may be temporary; nothing else is.
-	if k.total() <= calls || screens.Load() != screened || int(hits.Load()) != 120 {
+	if k.total() <= calls || screens.Load() != screened || int(hits.Load()) != 24 {
 		t.Errorf("rerun: %d Kite requests (was %d), %d screens (was %d), %d Jev requests", k.total(), calls, screens.Load(), screened, hits.Load())
 	}
 	// --report-only calls nothing at all.

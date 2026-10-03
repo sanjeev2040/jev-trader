@@ -38,6 +38,9 @@ const (
 	DefaultDecideTimeout = 800 * time.Millisecond
 	DefaultMaxInFlight   = 8
 	DefaultEventBuffer   = 8192
+	// DefaultDecideEvery is how often the trading commands ask the decider
+	// about an instrument: every fifth minute, not every bar (issue #53).
+	DefaultDecideEvery = 5 * time.Minute
 	// sessionOpen is the NSE session open in IST. Bars that start before it
 	// (the pre-open session) are not decision bars.
 	sessionOpenHour, sessionOpenMinute = 9, 15
@@ -91,6 +94,13 @@ type Config struct {
 	// Bars configures the bar builder. Its Base interval is the decision
 	// interval; it defaults to one minute.
 	Bars bars.Config
+	// DecideEvery is how often an instrument is put to the decider: only the
+	// base bars that close on a multiple of it start a cycle (09:20, 09:25, ...
+	// for five minutes). The other bars still feed the snapshot's history, the
+	// marks and the risk exits, which never wait for a decision. It must be a
+	// multiple of the base interval that divides 30 minutes, so it lines up
+	// with the exchange's day. Zero decides on every base bar.
+	DecideEvery time.Duration
 	// Snapshot configures the state sent to the decider.
 	Snapshot snapshot.Config
 	// IndexToken is the NIFTY 50 instrument. Its bars feed the snapshot's
@@ -142,6 +152,7 @@ type Config struct {
 type Stats struct {
 	Ticks, BarEvents  int // market-data events consumed
 	Bars              int // closed base-interval bars of watched instruments
+	OffCadence        int // of those, bars not on the decision cadence, so not decided on
 	Cycles            int // decision cycles logged
 	Holds             int // cycles whose answer was a HOLD
 	HoldSubstitutions int // cycles whose HOLD replaced a decider failure
@@ -211,6 +222,8 @@ func New(cfg Config) (*Engine, error) {
 		return nil, errors.New("engine: source, clock, decider, broker, gate and log are required")
 	case cfg.DecideTimeout < 0, cfg.MaxInFlight < 0, cfg.Latency < 0, cfg.AdvanceEvery < 0, cfg.EventBuffer < 0:
 		return nil, errors.New("engine: negative setting")
+	case cfg.DecideEvery < 0:
+		return nil, errors.New("engine: negative decision cadence")
 	case cfg.Window.Start < 0, cfg.Window.End < 0, cfg.Window.End != 0 && cfg.Window.End <= cfg.Window.Start:
 		return nil, errors.New("engine: window end must be after its start")
 	}
@@ -243,6 +256,9 @@ func New(cfg Config) (*Engine, error) {
 	base := cfg.Bars.Base
 	if base == 0 {
 		base = time.Minute
+	}
+	if cfg.DecideEvery > 0 && (cfg.DecideEvery%base != 0 || (30*time.Minute)%cfg.DecideEvery != 0) {
+		return nil, fmt.Errorf("engine: decision cadence %s must be a multiple of the %s base interval and divide 30m", cfg.DecideEvery, base)
 	}
 	e := &Engine{
 		cfg:       cfg,

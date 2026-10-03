@@ -28,9 +28,10 @@ func resolveCapital(ctx context.Context, e env, flagValue float64) (config.Capit
 	return config.Capital{Amount: flagValue, Source: capitalFromFlag, Detail: "--capital"}, nil
 }
 
-// tradingLimits are the risk limits for a session with the given capital.
-func tradingLimits(c config.Capital) risk.Limits {
-	l := risk.DefaultLimits()
+// tradingLimits are the risk limits for a session with the given capital and
+// trading rules.
+func tradingLimits(c config.Capital, r *tradingRules) risk.Limits {
+	l := r.apply(risk.DefaultLimits())
 	l.CapitalBudget = c.Amount
 	return l
 }

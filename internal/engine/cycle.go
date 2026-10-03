@@ -85,7 +85,19 @@ func (e *Engine) onBarClosed(ctx context.Context, b domain.Bar) error {
 		return nil
 	}
 	e.stats.Bars++
+	if !e.onCadence(b) {
+		e.stats.OffCadence++
+		return nil
+	}
 	return e.startDecision(ctx, b, open)
+}
+
+// onCadence reports whether a closed decision bar is one the decider is asked
+// about: it ends on a multiple of DecideEvery. Bars align to the UTC epoch,
+// and IST is a whole number of half hours ahead of it, so this is the same
+// boundary in IST.
+func (e *Engine) onCadence(b domain.Bar) bool {
+	return e.cfg.DecideEvery <= e.base || b.End.Truncate(e.cfg.DecideEvery).Equal(b.End)
 }
 
 // sampleEquity logs the cumulative PnL after costs once per bar-close time.

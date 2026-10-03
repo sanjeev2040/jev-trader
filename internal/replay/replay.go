@@ -49,9 +49,14 @@ type Config struct {
 	SourceName string
 	Label      string
 
-	Limits   risk.Limits
-	Paper    paper.Config
-	Bars     bars.Config
+	Limits risk.Limits
+	Paper  paper.Config
+	Bars   bars.Config
+	// DecideEvery is the engine's decision cadence; zero decides on every bar.
+	DecideEvery time.Duration
+	// Rules describes the trading rules (hold, cooldown, entry threshold,
+	// cadence) for the report; it is not interpreted.
+	Rules    string
 	Snapshot snapshot.Config
 	// IndexToken is the NIFTY 50 instrument; zero means none.
 	IndexToken uint32
@@ -124,7 +129,7 @@ func Run(ctx context.Context, cfg Config, specs []Spec) (*Report, error) {
 		e, err := engine.New(engine.Config{
 			RunID: runID, Mode: "replay", DeciderName: spec.Name, SourceName: cfg.SourceName,
 			Source: src, Clock: sim, Decider: spec.Decider, Broker: broker, Gate: gate, Log: cfg.Log,
-			Bars: cfg.Bars, Snapshot: cfg.Snapshot, IndexToken: cfg.IndexToken, Window: cfg.Window,
+			Bars: cfg.Bars, DecideEvery: cfg.DecideEvery, Snapshot: cfg.Snapshot, IndexToken: cfg.IndexToken, Window: cfg.Window,
 			WaitForDecisions: true, Latency: cfg.Latency, DecideTimeout: cfg.DecideTimeout,
 			BarSink: func(b domain.Bar) {
 				if b.Interval == base {
@@ -160,6 +165,7 @@ func Run(ctx context.Context, cfg Config, specs []Spec) (*Report, error) {
 		return nil, err
 	}
 	rep.Label = cfg.Label
+	rep.Rules = cfg.Rules
 	rep.Notes = notes
 	win := dayWindow{Start: cfg.Window.Start, End: cfg.Window.End}
 	rep.Window = win.String()

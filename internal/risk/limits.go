@@ -20,6 +20,17 @@ const (
 // configured. The deployed value is the Key Vault secret trading-capital.
 const DefaultCapitalBudget = 25_000
 
+// The trade-for-hours defaults (issue #53). The picker study found Jev's calls
+// right 46-48% of the time over 5 to 30 minutes but 55% by the close, so the
+// bot holds for an hour at least, waits an hour before going back into a stock
+// it sold, and only enters on a call that is both strong and repeated.
+const (
+	DefaultMinHold             = 60 * time.Minute
+	DefaultReentryCooldown     = 60 * time.Minute
+	DefaultEntryMinProbability = 0.70
+	DefaultEntryConfirmations  = 2
+)
+
 // IST is India Standard Time. It has no daylight saving, so a fixed zone is
 // exact and needs no tzdata.
 var IST = time.FixedZone("IST", 5*60*60+30*60)
@@ -44,6 +55,17 @@ type Limits struct {
 	// MinProbability is the minimum probability of the chosen action, per
 	// action, for the gate to act on it.
 	MinProbability map[domain.Action]float64
+	// EntryMinProbability is a higher bar for opening or adding to a position:
+	// an entry needs at least this probability as well as MinProbability for
+	// its action. Exits keep MinProbability alone, so being more choosy about
+	// entering never makes a position harder to leave. Zero turns it off.
+	EntryMinProbability float64
+	// EntryConfirmations is how many consecutive decisions on an instrument
+	// must choose the same BUY or SELL, each at or above the entry threshold,
+	// before the gate acts on the last of them (ReasonUnconfirmed). A HOLD, the
+	// other action or a call below the threshold starts the count again, as
+	// does an approved entry and a new trading day. One or zero turns it off.
+	EntryConfirmations int
 
 	// CapitalBudget is the total capital, in rupees, the bot may have at work
 	// at once: the cost of the positions it opened plus its open buy orders,
@@ -133,13 +155,15 @@ func DefaultLimits() Limits {
 			domain.SizeM: 0.10,
 			domain.SizeL: 0.20,
 		},
+		EntryMinProbability:      DefaultEntryMinProbability,
+		EntryConfirmations:       DefaultEntryConfirmations,
 		MaxPositionFraction:      0.20,
 		MaxPositionNotional:      50_000,
 		MaxGrossNotional:         200_000,
 		RotationMargin:           0.10,
-		RotationMinHold:          5 * time.Minute,
-		MinHold:                  5 * time.Minute,
-		ReentryCooldown:          10 * time.Minute,
+		RotationMinHold:          DefaultMinHold,
+		MinHold:                  DefaultMinHold,
+		ReentryCooldown:          DefaultReentryCooldown,
 		CostAware:                true,
 		CostMargin:               0.0005,
 		RangeWindow:              30 * time.Minute,
@@ -203,6 +227,12 @@ func (l Limits) Validate() error {
 		}
 	}
 	positive("capital budget", l.CapitalBudget)
+	if !(l.EntryMinProbability == 0 || (l.EntryMinProbability > 0 && l.EntryMinProbability <= 1)) {
+		bad("entry min probability must be 0 (off) or in (0, 1], got %v", l.EntryMinProbability)
+	}
+	if l.EntryConfirmations < 0 {
+		bad("entry confirmations must not be negative, got %d", l.EntryConfirmations)
+	}
 	if !(l.CostReserveRate >= 0 && l.CostReserveRate < 0.1) {
 		bad("cost reserve rate must be in [0, 0.1), got %v", l.CostReserveRate)
 	}

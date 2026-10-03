@@ -36,7 +36,7 @@ func testLimits() Limits {
 	l := DefaultLimits()
 	l.CapitalBudget = 250_000
 	l.SizeFraction = map[string]float64{domain.SizeS: 0.04, domain.SizeM: 0.10, domain.SizeL: 0.20}
-	l.MinHold, l.ReentryCooldown, l.CostAware = 0, 0, false // churn_test.go covers these
+	l.MinHold, l.ReentryCooldown, l.CostAware, l.EntryConfirmations, l.EntryMinProbability = 0, 0, false, 0, 0 // churn_test.go covers these
 	return l
 }
 

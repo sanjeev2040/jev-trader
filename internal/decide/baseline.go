@@ -54,7 +54,7 @@ type MomentumConfig struct {
 // Defaults for the Momentum baseline.
 const (
 	DefaultMomentumThresholdPct = 0.10
-	DefaultMomentumProbability  = 0.65
+	DefaultMomentumProbability  = 0.75
 )
 
 // Momentum is a simple trend-following baseline on the 5-bar percentage

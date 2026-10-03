@@ -161,7 +161,7 @@ func TestTradeSessionRecordsDecisionsTicksAndBars(t *testing.T) {
 func TestReplayCommandEndToEnd(t *testing.T) {
 	root := writeFixtureTicks(t)
 	logPath := filepath.Join(t.TempDir(), "nested", "decisions.db")
-	base := []string{"replay", "--data-dir", root, "--log", logPath, "--format", "json"}
+	base := append([]string{"replay", "--data-dir", root, "--log", logPath, "--format", "json"}, minuteRules...)
 
 	e, stdout, stderr := testEnv(nil)
 	if code := run(context.Background(), append(base, "--run-prefix", "cli", "--from", "2026-10-05", "--to", "2026-10-05"), e); code != 0 {

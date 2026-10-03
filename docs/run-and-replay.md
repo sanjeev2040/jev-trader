@@ -60,15 +60,33 @@ The bot trades with a total rupee budget, **₹25,000** unless configured. It is
 
 - **What counts.** The cost (average price × quantity) of the positions the bot opened, plus its open buy orders. Estimated costs are held back: the usable budget is `budget / (1 + 0.15%)`, so a 25,000 budget has about 24,963 at work at most. The hard gross cap in `risk.DefaultLimits` (₹200,000) is a ceiling above any configured budget.
 - **Sizing.** An entry is sized from the budget: size bucket S, M or L is 5%, 10% or 20% of it (₹1,250, ₹2,500, ₹5,000 at 25,000), never less than one share, clipped to the capital that is free, and to 20% of the budget in one stock. If not even one share fits, the entry is skipped with `budget_full` and says why in the decision log (`committed 24000.00 of budget 25000.00 ...: one share at 1000.00 does not fit`).
-- **Rotation.** When the budget is full and a BUY arrives that is stronger than a position the bot holds, the gate sells that position to free the capital. Only a position the bot opened today and has held for at least 5 minutes can go, only if the BUY's probability beats the probability it was opened at by 0.10, and only the weakest qualifying one, and only if selling it frees enough for one share. The sale is logged as its own cycle (`source risk`, exit reason `rotation`); when it fills, the engine asks the gate again for the BUY (cycle `<id>-rot-buy`, abandoned after 2 minutes), so the capital is never spent twice. Both orders obey the order-rate limits.
-- **Churn.** Three checks keep the bot from trading in and out of a stock for nothing; replays of 2026-10-01 showed RELIANCE round-tripping four times inside a 2-rupee range for -₹249, mostly costs. Each refusal is a gate verdict with its numbers in the decision log and in the replay walkthrough (`gate min_hold (...)`):
-  - **Minimum hold** (`min_hold`, 5 minutes). A decider's exit is refused until the position has been held that long, counted from its first entry. The square-off, the daily loss limit and the kill switch are not delayed. A position without an entry time (restored from the journal) is not held back.
-  - **Re-entry cooldown** (`reentry_cooldown`, 10 minutes). After the bot sells out of an instrument (a decider exit, a risk exit or a rotation) it may not open a new position in it until the cooldown has passed. Other instruments are not affected.
+- **Rotation.** When the budget is full and a BUY arrives that is stronger than a position the bot holds, the gate sells that position to free the capital. Only a position the bot opened today and has held for at least the minimum hold (an hour) can go, only if the BUY's probability beats the probability it was opened at by 0.10, and only the weakest qualifying one, and only if selling it frees enough for one share. The sale is logged as its own cycle (`source risk`, exit reason `rotation`); when it fills, the engine asks the gate again for the BUY (cycle `<id>-rot-buy`, abandoned after 2 minutes), so the capital is never spent twice. Both orders obey the order-rate limits.
+- **Churn.** Four checks keep the bot from trading in and out of a stock for nothing; replays of 2026-10-01 showed RELIANCE round-tripping four times inside a 2-rupee range for -₹249, mostly costs. Each refusal is a gate verdict with its numbers in the decision log and in the replay walkthrough (`gate min_hold (...)`):
+  - **Minimum hold** (`min_hold`, 60 minutes; `--min-hold`). A decider's exit is refused until the position has been held that long, counted from its first entry. The square-off, the daily loss limit and the kill switch are not delayed. A position without an entry time (restored from the journal) is not held back.
+  - **Re-entry cooldown** (`reentry_cooldown`, 60 minutes; `--reentry-cooldown`). After the bot sells out of an instrument (a decider exit, a risk exit or a rotation) it may not open a new position in it until the cooldown has passed. Other instruments are not affected.
   - **Cost-aware entry** (`cost_edge`). An entry is refused unless the expected move beats the round-trip costs plus a margin. Expected move = (2p − 1) × the instrument's high-to-low range over the last 30 minutes, where p is the decision's probability; it needs at least costs (the 0.15% `CostReserveRate`) plus a 0.05% margin of the price. At 1,400 that is ₹2.80 a share, so a 2-rupee range is refused at any probability, while a 12-rupee range admits p = 0.8 (7.20). The range comes from the ticks (or bar highs and lows) the engine feeds the book; with no price history yet the check is skipped.
 
-  All of it is in `risk.Limits` (`MinHold`, `ReentryCooldown`, `CostAware`, `CostMargin`, `RangeWindow`, with `CostReserveRate`); a zero hold or cooldown, or `CostAware = false`, turns a check off.
+  - **Entry bar and confirmation** (`below_probability_threshold`, `entry_unconfirmed`). See [Trading for hours](#trading-for-hours).
+
+  All of it is in `risk.Limits` (`MinHold`, `ReentryCooldown`, `EntryMinProbability`, `EntryConfirmations`, `CostAware`, `CostMargin`, `RangeWindow`, with `CostReserveRate`); a zero hold or cooldown, or `CostAware = false`, turns a check off.
 - **Many trades.** Buying and selling the same stock several times a day is allowed across all 50 names, subject to the churn checks above and within the order-rate limits (3 a second, 60 a minute, 500 a day) and the daily loss limit (₹5,000), which still halt new entries.
 - **Holdings it did not open are out of bounds.** The bot never sells, modifies or otherwise touches a holding or position it did not open, such as your existing Zerodha holdings. Every position in its book comes from its own fills; anything else is registered as foreign (`Book.SetForeign`), and the gate refuses every order in it (`foreign_position`), counts nothing of it against the budget and never flattens it. `internal/risk/budget_test.go` and `internal/engine/rotation_test.go` test this as an invariant.
+
+### Trading for hours
+
+The 2026-09-14 to 2026-10-01 picker study (13 days, 09:15–10:15, ₹25,000) found Jev's BUY and SELL calls right 46–48% of the time at 5, 15 and 30 minutes but 54.9% at the day's close, with flat calibration (its 90%-plus calls were right about 47% of the time). So the defaults now hold for hours and enter less often. Each rule is a flag on `run`, `replay` and `study` with the same default, so a `study` of the defaults is a study of what `run` does, and each is shown in the walkthrough (the report's `Trading rules:` line, and `gate <reason> (...)` on every refused decision).
+
+| Flag | Default | Rule |
+| --- | --- | --- |
+| `--min-hold` | `1h` | A decider's exit, and a rotation, may not sell a position until it has been held this long. `0` turns it off. |
+| `--reentry-cooldown` | `1h` | After selling out of an instrument, no new position in it for this long. `0` turns it off. |
+| `--entry-min-probability` | `0.70` | An entry needs at least this probability, on top of the 0.60 base threshold. Exits keep 0.60, so being choosy about entering never makes a position harder to leave. `0` turns it off. |
+| `--entry-confirmations` | `2` | An entry is acted on only when this many decisions in a row on the instrument chose the same BUY or SELL, each at or above the entry threshold. A HOLD, the other action, a weaker call, an approved entry or a new day starts the count again. `0` or `1` turns it off. |
+| `--decide-every` | `5m` | How often an instrument is put to the decider, aligned to the clock (09:20, 09:25, ...). `1m` decides on every bar. Must be whole minutes that divide 30 (`1m`, `5m`, `15m`, `30m`, ...). |
+
+With the defaults an entry needs two strong calls five minutes apart, so the earliest one is 09:25 for the first bar of the day (entries open at 09:20), Jev is asked a fifth as often, and a position is then held at least an hour (to the 15:10 square-off at the latest). What does not change: stops, the square-off at 15:10, the daily loss limit and the kill switch exit at once on every tick, whatever the cadence, hold or cooldown; the capital budget, sizing and the rule that the bot only ever sells positions it opened are unchanged. The `momentum` baseline now reports 0.75 for its calls so it still clears the entry bar and stays a usable benchmark.
+
+To reproduce the old behaviour for a comparison: `--decide-every 1m --entry-confirmations 0 --entry-min-probability 0.6 --min-hold 5m --reentry-cooldown 10m`.
 
 ### Where the budget comes from
 
@@ -128,10 +146,11 @@ Flags for a session on one past day, used in the runbook below:
 | `--walkthrough actions\|all` | add each run's chronological walk, instrument by instrument |
 | `--compare` | add the comparison with what the market then did; also replays the `hold` and `momentum` baselines if they are not in `--deciders` |
 | `--lookahead 5m,15m,30m` | with `--compare`, how long after each BUY/SELL to read the price |
+| `--min-hold`, `--reentry-cooldown`, `--entry-min-probability`, `--entry-confirmations`, `--decide-every` | the trading rules; see [Trading for hours](#trading-for-hours) |
 | `--index <token>` | name the index by instrument token (NIFTY 50 is `256265`) when the stored bars have no symbol |
 | `--watchlist-file <file>` | replay only the instruments of a watchlist file written by `screen` (found in the stored data by symbol; the index stays as context; not with `--tokens`) |
 
-Without these flags the output is exactly what it was before.
+Without these flags the output has the same shape as before, but the trading rules now default to trading for hours.
 
 ### Session window
 
@@ -210,7 +229,7 @@ This fetches 1-minute candles for each instrument into `data/bars_backfill/` (ab
   --walkthrough all --compare --run-prefix d0930 --out replay-2026-09-30.txt
 ```
 
-Jev is asked once per instrument per closed minute, so this hour is about 60 calls per instrument; start with two or three instruments. The first decision comes at 09:16 on the 09:15 bar and shows `gate outside_session` until 09:20, when the risk gate allows entries. To give the decider an hour of warm-up context without trading it, use `--start 09:45 --end 10:45`; the bars from 09:15 still build the snapshots. Add `--format json` for the machine-readable report, `--walkthrough actions` to hide the HOLD rows, `--lookahead 10m,30m,60m` to change how far ahead the prices are read. `--compare` also replays the baselines, so `hold` and `momentum` appear in the table without being named. Every run is also written to the decision log (`--log`, default `state/decisions.db`), which can be queried or replayed with `recorded:<run-id>`.
+With the default `--decide-every 5m` Jev is asked once per instrument per five minutes, so this hour is about 12 calls per instrument (about 60 with `--decide-every 1m`); start with two or three instruments. The first decision comes at 09:20 on the bar that closes then, when the risk gate allows entries, and the entry needs two strong calls in a row (`gate entry_unconfirmed` on the first). To give the decider an hour of warm-up context without trading it, use `--start 09:45 --end 10:45`; the bars from 09:15 still build the snapshots. Add `--format json` for the machine-readable report, `--walkthrough actions` to hide the HOLD rows, `--lookahead 10m,30m,60m` to change how far ahead the prices are read. `--compare` also replays the baselines, so `hold` and `momentum` appear in the table without being named. Every run is also written to the decision log (`--log`, default `state/decisions.db`), which can be queried or replayed with `recorded:<run-id>`.
 
 ### 5. Read the report
 
