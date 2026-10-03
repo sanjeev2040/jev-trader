@@ -63,7 +63,7 @@ func trade(ctx context.Context, args []string, e env) error {
 	record := fs.Bool("record", true, "also record ticks and closed bars under --data-dir")
 	buffer := fs.Int("buffer", 8192, "market-data channel capacity")
 	fs.Usage = func() {
-		fmt.Fprintln(e.stderr, "usage: jevtrader run --watchlist NSE:INFY,NSE:TCS [flags]\n\nTrades on live Kite data with Jev decisions, the risk gate and the paper broker.\nRun `jevtrader login` first. Reads KITE_API_KEY, KITE_API_SECRET and JEV_API_KEY.\n\nflags:")
+		fmt.Fprintln(e.stderr, "usage: jevtrader run --watchlist NSE:INFY,NSE:TCS [flags]\n\nTrades on live Kite data with Jev decisions, the risk gate and the paper broker.\nRun `jevtrader login` first. Reads KITE_API_KEY, KITE_API_SECRET and JEV_API_KEY from the environment, or from the\nAzure Key Vault named by JEVTRADER_KEYVAULT.\n\nflags:")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -86,7 +86,10 @@ func trade(ctx context.Context, args []string, e env) error {
 		return usageError{errors.New("--buffer must be positive")}
 	}
 
-	secrets := config.LoadSecrets(e.lookup)
+	secrets, err := loadSecrets(ctx, e, config.EnvKiteAPIKey, config.EnvKiteAPISecret, config.EnvJevAPIKey)
+	if err != nil {
+		return usageError{err}
+	}
 	if err := secrets.RequireKite(); err != nil {
 		return usageError{err}
 	}

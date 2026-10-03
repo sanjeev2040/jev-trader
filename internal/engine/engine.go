@@ -52,6 +52,17 @@ type Feed interface {
 	OnBar(domain.Bar)
 }
 
+// Window limits trading to part of each IST day, as offsets from IST midnight
+// (09:15 is 9*time.Hour + 15*time.Minute). The market data before Start still
+// flows through the engine, so snapshots, indicators and marks warm up, but
+// no decision is asked for on a bar that starts before Start. Nothing at or
+// after End reaches the clock, the broker or the risk book; such data goes
+// only to the bar sink, so evaluation can still see the rest of the day. A
+// zero Start or End leaves that side open.
+type Window struct {
+	Start, End time.Duration
+}
+
 // Config assembles an engine. Source, Clock, Decider, Broker, Gate and Log are
 // the swappable edges and shared parts; the rest tunes them.
 type Config struct {
@@ -81,6 +92,9 @@ type Config struct {
 	// IndexToken is the NIFTY 50 instrument. Its bars feed the snapshot's
 	// index context and are never traded. Zero means no index.
 	IndexToken uint32
+	// Window limits trading to part of each day; the zero value is the whole
+	// day.
+	Window Window
 
 	// WaitForDecisions makes the engine stop reading the source until every
 	// in-flight decision has resolved, so the simulated clock cannot run ahead
@@ -191,6 +205,8 @@ func New(cfg Config) (*Engine, error) {
 		return nil, errors.New("engine: source, clock, decider, broker, gate and log are required")
 	case cfg.DecideTimeout < 0, cfg.MaxInFlight < 0, cfg.Latency < 0, cfg.AdvanceEvery < 0, cfg.EventBuffer < 0:
 		return nil, errors.New("engine: negative setting")
+	case cfg.Window.Start < 0, cfg.Window.End < 0, cfg.Window.End != 0 && cfg.Window.End <= cfg.Window.Start:
+		return nil, errors.New("engine: window end must be after its start")
 	}
 	if err := cfg.Snapshot.Validate(); err != nil {
 		return nil, err
@@ -368,6 +384,16 @@ func eventTime(t domain.Tick) time.Time {
 
 func (e *Engine) onTick(ctx context.Context, t domain.Tick) error {
 	ts := eventTime(t)
+	if end := e.windowEnd(ts); !end.IsZero() && !ts.Before(end) {
+		// Past the window only the bar builder sees the tick: it closes the
+		// window's last bars, and the bar sink keeps the day's prices whole.
+		for _, b := range e.builder.Add(t) {
+			if err := e.onBarClosed(ctx, b); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	e.moveClock(ts)
 	if e.cfg.TickSink != nil {
 		e.cfg.TickSink(t)
@@ -394,6 +420,9 @@ func (e *Engine) onTick(ctx context.Context, t domain.Tick) error {
 }
 
 func (e *Engine) onBar(ctx context.Context, b domain.Bar) error {
+	if end := e.windowEnd(b.Start); !end.IsZero() && b.End.After(end) {
+		return e.onBarClosed(ctx, b) // the sink only; see Window
+	}
 	e.moveClock(b.End)
 	e.book.Mark(b.Instrument.Token, b.Close)
 	if e.feed != nil {

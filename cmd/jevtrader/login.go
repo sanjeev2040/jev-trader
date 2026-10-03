@@ -22,7 +22,7 @@ func runLogin(ctx context.Context, args []string, e env) int {
 	stateDir := fs.String("state-dir", "", "directory for the session file (default $XDG_STATE_HOME/jevtrader or ~/.local/state/jevtrader)")
 	timeout := fs.Duration("timeout", 5*time.Minute, "how long to wait for the browser login")
 	fs.Usage = func() {
-		fmt.Fprintln(e.stderr, "usage: jevtrader login [flags]\n\nLogs in to Kite Connect by hand in a browser and saves the day's access token.\nReads KITE_API_KEY and KITE_API_SECRET from the environment.\n\nflags:")
+		fmt.Fprintln(e.stderr, "usage: jevtrader login [flags]\n\nLogs in to Kite Connect by hand in a browser and saves the day's access token.\nReads KITE_API_KEY and KITE_API_SECRET from the environment, or from the Azure\nKey Vault named by JEVTRADER_KEYVAULT (kite-api-key, kite-api-secret).\n\nflags:")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -36,8 +36,11 @@ func runLogin(ctx context.Context, args []string, e env) int {
 		return 2
 	}
 
-	secrets := config.LoadSecrets(e.lookup)
-	if err := secrets.RequireKite(); err != nil {
+	secrets, err := loadSecrets(ctx, e, config.EnvKiteAPIKey, config.EnvKiteAPISecret)
+	if err == nil {
+		err = secrets.RequireKite()
+	}
+	if err != nil {
 		fmt.Fprintf(e.stderr, "jevtrader login: %v\n", err)
 		return 1
 	}

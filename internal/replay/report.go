@@ -26,10 +26,15 @@ const OptimisticCaveat = "Backtests over any period before the model's release a
 
 // Report compares runs over the same data.
 type Report struct {
-	Label   string       `json:"label"`   // what data the runs replayed
-	Horizon int          `json:"horizon"` // bars ahead a directional call is scored
+	Label   string       `json:"label"`            // what data the runs replayed
+	Window  string       `json:"window,omitempty"` // the IST window of each day the runs traded, if limited
+	Horizon int          `json:"horizon"`          // bars ahead a directional call is scored
 	Runs    []RunMetrics `json:"runs"`
-	Notes   []string     `json:"notes,omitempty"`
+	// Walkthrough is each run's session step by step, when asked for.
+	Walkthrough []RunWalk `json:"walkthrough,omitempty"`
+	// Comparison sets the runs against the real market, when asked for.
+	Comparison *Comparison `json:"comparison,omitempty"`
+	Notes      []string    `json:"notes,omitempty"`
 }
 
 // RunMetrics are one run's results, computed from its decision log.
@@ -333,6 +338,9 @@ func (r *Report) WriteText(w io.Writer) error {
 		}
 	}
 	printf("Evaluation report: %s\n", r.Label)
+	if r.Window != "" {
+		printf("Trading window: %s (earlier bars of the day only warm the indicators up)\n", r.Window)
+	}
 	printf("PnL is in rupees after brokerage, taxes and fees. Calibration scores BUY/SELL calls %d bars ahead.\n\n", r.Horizon)
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', tabwriter.AlignRight)
@@ -373,6 +381,14 @@ func (r *Report) WriteText(w io.Writer) error {
 		if m.HoldSubstitutions > 0 {
 			printf("\n%s: %d of %d answers were HOLDs substituted for decider failures.\n", m.RunID, m.HoldSubstitutions, m.Cycles)
 		}
+	}
+	for _, wk := range r.Walkthrough {
+		if err == nil {
+			err = wk.writeText(w)
+		}
+	}
+	if r.Comparison != nil && err == nil {
+		err = r.Comparison.writeText(w)
 	}
 	for _, n := range r.Notes {
 		printf("\nNote: %s\n", n)

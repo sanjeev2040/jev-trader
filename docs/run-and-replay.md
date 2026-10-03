@@ -58,6 +58,118 @@ price then moved that way `--horizon` bars later). Replays on
 Backtests are optimistic upper bounds while the model's training cutoff is
 unknown; forward paper trading is the deciding evidence.
 
+Flags for a session on one past day, used in the runbook below:
+
+| Flag | Effect |
+| --- | --- |
+| `--start HH:MM`, `--end HH:MM` | trade only inside this IST window of each day (see [Session window](#session-window)) |
+| `--walkthrough actions\|all` | add each run's chronological walk, instrument by instrument |
+| `--compare` | add the comparison with what the market then did; also replays the `hold` and `momentum` baselines if they are not in `--deciders` |
+| `--lookahead 5m,15m,30m` | with `--compare`, how long after each BUY/SELL to read the price |
+| `--index <token>` | name the index by instrument token (NIFTY 50 is `256265`) when the stored bars have no symbol |
+
+Without these flags the output is exactly what it was before.
+
+### Session window
+
+`--start 09:20 --end 10:15` makes the engine decide only on bars that start at or after 09:20 and that end by 10:15. Bars of the day before `--start` are still fed through the same path, so the first decision already has real history: its returns, session range, VWAP and index context are built from 09:15 onwards, and the paper broker's marks are current. They are never decided on, so they cost no model calls and no orders. Data after `--end` never reaches the clock, the broker or the risk book; it only provides the prices the comparison looks at, so a call at 10:14 can still be checked 30 minutes later. A position still open at `--end` is marked at the window's last price, not closed.
+
+The risk gate's own hours still apply inside the window: no new entries before 09:20 or from 15:00, and everything is squared off from 15:10. A decision at 09:16 therefore shows `gate outside_session`.
+
+### Walkthrough
+
+`--walkthrough all` adds, per run and per instrument, every step in time order (illustrative output):
+
+```
+Walkthrough: jev (s-jev)
+
+  NSE:INFY: 55 decisions (BUY 2, SELL 1, HOLD 52), 3 fills, ends flat, net PnL +41.20
+    -- 2026-10-05 --
+    09:21:00  DECIDE BUY  p=0.71 size S @ 1515.00 | ret5 +1.00% ret15 n/a session +1.00% vwap +0.40% vol 1.20x range 1.00 index +0.30% | gate approved -> order BUY 6 | pos flat  pnl +0.00
+    09:22:00  FILL   BUY 6 @ 1515.60 (costs 3.82) | pos +6 @ 1515.60  pnl -3.82
+    09:41:00  DECIDE SELL p=0.64 size S @ 1531.00 | ret5 ... | gate approved -> order SELL 6 | pos +6 @ 1515.60  pnl +88.60
+```
+
+A decision row has the action, the probability and size the decider gave, the snapshot values that mattered (5 and 15 bar returns, session return, distance from VWAP, relative volume, position in the session range, the index's session return; `n/a` when there is too little history), the risk gate's verdict with its reason when it refused, the order the gate approved, and the running position and PnL (after costs, marked at the bar's close). A fill row has the side, quantity, price and costs. `actions` leaves out the HOLD rows (decisions the decider failed on stay), and the counts in the instrument's header still include them. In `--format json` the same rows are under `walkthrough`.
+
+### Comparison with what the market did
+
+`--compare` adds, from the replayed data, which includes the part of the day after `--end`:
+
+- every BUY and SELL answer (refused ones too, with the gate's reason), with the actual price N minutes later for each `--lookahead`, at the window's end and at the day's close, and the percentage move in the direction the call bet on (positive means right). `n/a` means the data stops before that point. Per run and horizon, the number of calls that moved the called way and the mean move;
+- a buy-and-hold benchmark: every instrument bought at the open of the window's first bar for about the size-M notional and held to the close of its last bar, after the same costs the paper broker charges;
+- each run's net PnL over the window beside that benchmark, the always-HOLD baseline (which never trades) and the momentum baseline. Both baselines run on the same data, window and costs.
+
+The benchmark buys at an open and the strategies buy at fill prices after decision latency, so they differ by that slippage. In `--format json` this is `comparison`.
+
+## Runbook: paper-trade a past day locally
+
+Goal: replay one past session, see which instruments Jev picks at the open, what it buys and sells and how the day flows, and compare that with what the market did. Everything runs on your Mac; no order reaches Kite.
+
+### 0. Prerequisites
+
+- **Azure CLI, logged in** (`az login`), with the *Key Vault Secrets User* role on the vault (the template gives the operator *Secrets Officer* when `operatorObjectId` is set; see [deploy/README.md](../deploy/README.md)).
+- **A Kite Connect app** whose redirect URL is registered as in [docs/kite-auth.md](kite-auth.md) (`http://127.0.0.1:8765/kite/callback` by default).
+- **A Kite historical-data subscription.** Kite's historical candles API (`backfill`) is part of the paid Kite Connect plan; on the free Personal plan Kite refuses the request and `backfill` fails with its permission error. Login, live ticks and orders do not need it, and neither does `replay` over data you recorded yourself with `record` (`--source ticks`). Check [Zerodha's current plans](https://kite.trade/) before relying on this.
+- The Jev model is pinned to `jev-1.13.0` (`POST https://api.typesafe.ai/v1/systemone`); `replay` uses it for `--deciders jev`.
+
+Build once: `go build -o jevtrader ./cmd/jevtrader` (or prefix the commands below with `go run ./cmd/jevtrader`).
+
+### 1. Secrets from Key Vault
+
+```sh
+export JEVTRADER_KEYVAULT=kv-jev-wpvd3louqq
+```
+
+With it set, `login` reads `kite-api-key` and `kite-api-secret`, `backfill` reads `kite-api-key`, `replay` reads `jev-api-key` (only when `jev` is among the deciders), and `run` reads all three, each with `az keyvault secret show --vault-name ... --name ... --query value -o tsv` through your `az login` session. Nothing is written to disk or to an env file, and a value is never printed or logged. If the vault cannot be read for a secret, the matching environment variable (`KITE_API_KEY`, `KITE_API_SECRET`, `JEV_API_KEY`) is used instead, with a warning that names the secret but not its value; if neither has it, the command fails and says what failed. Without `JEVTRADER_KEYVAULT` the environment variables are the only source, as before. `record` still reads `KITE_API_KEY` from the environment.
+
+### 2. Log in to Kite
+
+```sh
+./jevtrader login
+```
+
+It prints a Kite login URL; open it in your browser on the Mac, log in and complete 2FA. The redirect lands on the listener on `127.0.0.1:8765` directly, so no tunnel is needed (that is only for a remote VM). The session is saved under `~/.local/state/jevtrader/` (mode `0600`) and is valid until 06:00 IST the next day; `backfill` picks it up from there, so you do not export `KITE_ACCESS_TOKEN`.
+
+### 3. Backfill the day
+
+```sh
+./jevtrader backfill --symbols "NSE:INFY,NSE:TCS,NSE:RELIANCE,NSE:NIFTY 50" --from 2026-09-30 --derive ""
+```
+
+This fetches 1-minute candles for each instrument into `data/bars_backfill/` (about 375 per instrument for a full session). `--symbols` looks the instruments up in Kite's instrument master (cached under `--data-dir`) so the stored bars carry their symbol; `--tokens 408065,256265` also works but leaves the bars without one. Always include `NSE:NIFTY 50`: it is the index context in every snapshot and is never traded. Backfill refuses a day it already holds; delete `data/bars_backfill/date=2026-09-30` to fetch it again. It makes 3 requests a second at most.
+
+### 4. Replay a window
+
+```sh
+./jevtrader replay --source backfill --from 2026-09-30 --to 2026-09-30 \
+  --start 09:15 --end 10:15 --deciders jev \
+  --walkthrough all --compare --run-prefix d0930 --out replay-2026-09-30.txt
+```
+
+Jev is asked once per instrument per closed minute, so this hour is about 60 calls per instrument; start with two or three instruments. The first decision comes at 09:16 on the 09:15 bar and shows `gate outside_session` until 09:20, when the risk gate allows entries. To give the decider an hour of warm-up context without trading it, use `--start 09:45 --end 10:45`; the bars from 09:15 still build the snapshots. Add `--format json` for the machine-readable report, `--walkthrough actions` to hide the HOLD rows, `--lookahead 10m,30m,60m` to change how far ahead the prices are read. `--compare` also replays the baselines, so `hold` and `momentum` appear in the table without being named. Every run is also written to the decision log (`--log`, default `state/decisions.db`), which can be queried or replayed with `recorded:<run-id>`.
+
+### 5. Read the report
+
+Top to bottom:
+
+1. **Evaluation report**: one row per run (net PnL after costs, trades, hit rate, drawdown, turnover, B/S/H counts) and the calibration table. The line under the title names the window.
+2. **Walkthrough**: the opening decisions per instrument show what Jev saw (returns, VWAP distance, volume, index) and what it answered; later rows show what it bought and sold, the price each fill got and how position and PnL moved. Look at the first rows of each instrument for the leads at the open, and at `gate ...` for what the risk gate refused and why.
+3. **Comparison with the real market**: the price after each BUY and SELL at the lookahead horizons, at the window end and at the close, with the move in the called direction; then the buy-and-hold benchmark per instrument, and a table with each run's net PnL against buy-and-hold, always-HOLD and momentum.
+
+A replay of a past day is an optimistic upper bound: Jev may have seen that period in training, and the replay fills orders on minute candles, not on the order book. Treat it as a way to see how the system behaves, not as proof of an edge.
+
+### Troubleshooting
+
+| Symptom | Cause |
+| --- | --- |
+| `key vault kv-...: az failed: ... Forbidden` | your identity lacks *Key Vault Secrets User* on the vault |
+| `key vault ...: the az CLI is not installed` / `Please run 'az login'` | install the Azure CLI and `az login`; or unset `JEVTRADER_KEYVAULT` and export the variables |
+| `backfill`: `Insufficient permission` or an HTTP 403 on `/instruments/historical` | the Kite app has no historical-data subscription |
+| `KITE_API_KEY and KITE_ACCESS_TOKEN must be set` | run `jevtrader login` (the saved session is missing or expired) |
+| `index "NSE:NIFTY 50" is not in the stored data` | backfill without `NSE:NIFTY 50` or without `--symbols`; add it, or pass `--index 256265` |
+| every decision is a HOLD with `[decider failed: ...]` | Jev was unreachable or returned an invalid answer; check `JEV_API_KEY`/the vault secret and `--decide-timeout` |
+
 ## Decision log
 
 `internal/decisionlog` is append-only (triggers reject `UPDATE` and `DELETE`).
