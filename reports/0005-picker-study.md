@@ -33,7 +33,7 @@ The stocks of the random list are also what makes the signal table informative: 
 Everything is cached under `--data-dir` and a rerun asks nothing it has been told before:
 
 - **Daily candles** for the screen are fetched once per stock for the whole range (`study.NewRangeMarket`) and sliced for each day; the screen's own per-day candle cache and its news-score cache still apply.
-- **Minute candles** are stored per instrument and day under `<data-dir>/study/bars_backfill`, with a manifest per day, so a halted stock is not asked for again and a changed random list fetches only the new names. Kite is called at no more than three requests a second.
+- **Minute candles** are stored per instrument and day under `<data-dir>/study/bars_backfill`, with a manifest per day, so a changed random list fetches only the new names. An instrument that came back empty is not recorded and is asked again on the next run, in case the cause was temporary. Kite is called at no more than three requests a second.
 - **Jev's answers** are stored by model and exact snapshot (`study.AnswerStore`, wrapped around the Jev client as a decider). Reruns, resumed runs and weight experiments that leave a snapshot unchanged are free, and a replay is deterministic. A failed call is never stored. A fixed decision latency (`--latency`, default 1 s) makes the fills independent of how fast Jev answered.
 - **Day results** are stored under a key of everything they depend on; a changed setting recomputes the day, and `--report-only` rebuilds the report without calling anything.
 

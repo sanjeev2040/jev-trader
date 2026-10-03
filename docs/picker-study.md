@@ -49,7 +49,7 @@ Everything is under `--data-dir`, so a rerun, a resumed run after a failure and 
 | Daily candles of the universe | `<data-dir>/screen/` (as `screen`), fetched once per stock for the whole range | always, for a day already screened |
 | News scores from Jev | `<data-dir>/screen/news-<date>.json` (as `screen`) | the same pair of news item and company under the same model |
 | Watchlists with their pool | `<data-dir>/study/watchlist/<screen key>/<date>.json` | the picker settings (top N, weights, sector cap, minimum score, news sources, model) are unchanged |
-| 1-minute candles | `<data-dir>/study/bars_backfill/` and `<data-dir>/study/fetched/<date>.json` | per instrument and day, whatever else changes |
+| 1-minute candles | `<data-dir>/study/bars_backfill/` and `<data-dir>/study/fetched/<date>.json` | per instrument and day, whatever else changes; an instrument that returned no candles is asked again |
 | Jev's answers | `<data-dir>/study/jev-answers.jsonl` | the same model asked about the same snapshot; a failed call is never stored |
 | Day results | `<data-dir>/study/days/<run key>/<date>.json` | the window, deciders, random-list settings, capital, latency, horizon and picker settings are unchanged |
 | The decision log of the replays | `<data-dir>/study/decisions.db` | for inspection; every replay is a run `study-<date>-<list>-<time>-<decider>` |
