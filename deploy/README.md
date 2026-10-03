@@ -71,7 +71,7 @@ Edit `infra/main.local.bicepparam` and replace every `REPLACE_ME`:
 
 - `adminSshPublicKey`: your public key, for example the output of `cat ~/.ssh/id_ed25519.pub`.
 - `operatorCidr`: your public IP as `/32`. This is the only address that can reach SSH. When your IP changes, update the NSG rule (see "Operations").
-- `watchlist` and `jevModel`: the instruments to paper-trade and the pinned Jev model id (`jevModel` defaults to `jev-1.13.0`). The VM refuses to start `run` while `jevModel` is a placeholder. With `screenEnabled` (the default) the VM screens for the day's list before the open and `watchlist` is only the fallback `run` uses when the screen produced no usable file for today; `screenArgs` passes extra flags to `jevtrader screen` (weights, filters, `--top`; see `jevtrader screen -h`).
+- `watchlist` and `jevModel`: the instruments to paper-trade and the pinned Jev model id (`jevModel` defaults to `jev-1.13.0`). The VM refuses to start `run` while `jevModel` is a placeholder. With `screenEnabled` (the default) the VM screens for the day's list before the open and `watchlist` is only the fallback `run` uses when the screen produced no usable file for today; `screenArgs` passes extra flags to `jevtrader screen` (weights, filters, `--top`, which defaults to 50; see `jevtrader screen -h`).
 - `alertEmail`: where the action group and budget alerts (80% and 100% of $25, plus a 100% forecast) go.
 - Optionally `operatorObjectId` (`az ad signed-in-user show --query id -o tsv`): you then get Key Vault Secrets Officer from the template. Otherwise grant it yourself in step 7.
 
@@ -158,6 +158,14 @@ unset v
 
 Role assignments can take a few minutes to take effect. The VM identity already holds Key Vault Secrets User.
 
+**The trading budget.** `trading-capital` is the total rupee budget the bot may have at work (the cost of the positions it opened plus its open buy orders). It is a setting, not a credential, so it is read and logged in clear; it lives in Key Vault so you can change it without a deploy. It is optional: without it the VM boots with the built-in ₹25,000.
+
+```sh
+az keyvault secret set --vault-name "$KV" --name trading-capital --value 25000 --output none
+```
+
+`jevtrader-prepare` reads it at every boot and passes it to `run` as `JEVTRADER_TRADING_CAPITAL` (the boot log says `trading capital is 25000 rupees`). To change it later, run the command above with the new amount and restart the trading units: `sudo systemctl restart jevtrader-prepare jevtrader-run`; a running session keeps the budget it started with. A value that is not a positive number stops `jevtrader-prepare` rather than trading on a budget nobody chose; a missing secret does not. How the budget limits entries, and when the bot sells one of its own positions to make room, is in [docs/run-and-replay.md](../docs/run-and-replay.md#capital-budget).
+
 ### 8. Kite developer console
 
 In the [Kite developer console](https://developers.kite.trade/), confirm the app's redirect URL is exactly `http://127.0.0.1:8765/kite/callback` (see [docs/kite-auth.md](../docs/kite-auth.md)). Paper trading needs no IP registration. Before live trading, add the `publicIpAddress` output as the primary static IP and check the console for the current rules on changing registered IPs.
@@ -229,6 +237,7 @@ At 15:40 IST the backup timer copies the new Parquet files and a consistent SQLi
 | Workflow summary says "Azure is not configured yet" | the repository variables in step 6 |
 | `azure/login` fails with `AADSTS70021` or "No matching federated identity record" | the environment name, `githubRepo` and the numeric `githubOwnerId`/`githubRepoId` must match the credential subject exactly (`AADSTS700213` shows the subject GitHub presented); check `AZURE_CLIENT_ID` is set on the *environment*, not only on the repository |
 | `jevtrader-prepare` says "no valid jev-image tag" | no release has run yet; merge to `main` or run the Release workflow |
+| `jevtrader-prepare` says `secret 'trading-capital' is '...', not a positive number` | fix the value: `az keyvault secret set --vault-name "$KV" --name trading-capital --value 25000` |
 | `jevtrader-prepare` cannot read a secret | the secret is not set, or the Key Vault role assignment has not propagated yet (it retries every 30 s) |
 | `jevtrader-run` keeps restarting | `journalctl -u jevtrader-run`: usually Kite rejecting the session; log in again |
 | `run` traded the static list although screening is on | `journalctl -u jevtrader-run` says why (`watchlist file not used`: missing, or not for today); then `journalctl -u 'jevtrader-screen@*'`: usually no Kite login before 09:08, an NSE or Kite error, or no stock scoring above the minimum |

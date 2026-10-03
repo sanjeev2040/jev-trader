@@ -56,6 +56,7 @@ func trade(ctx context.Context, args []string, e env) error {
 	liveEnabled := fs.Bool("live-enabled", false, "live.enabled: one of the two switches live trading needs besides --mode=live (it is also gated off in code)")
 	watchlist := fs.String("watchlist", "", `comma-separated instruments, e.g. "NSE:INFY,NSE:TCS" (exact EXCHANGE:SYMBOL keys; required unless --watchlist-file is given, and the fallback when that file is missing or stale)`)
 	watchlistFile := fs.String("watchlist-file", "", "today's watchlist file written by `jevtrader screen` (e.g. state/watchlist/2026-10-05.json); used instead of --watchlist when it exists and is for today's IST date")
+	capitalFlag := fs.Float64("capital", 0, capitalFlagHelp)
 	indexKey := fs.String("index", "NSE:NIFTY 50", `index used as snapshot context and never traded; "" for none`)
 	model := fs.String("model", jev.DefaultModel, "pinned Jev model id (\"jev-latest\" is rejected)")
 	jevURL := fs.String("jev-url", "", "Jev base URL (default: the public API)")
@@ -101,6 +102,12 @@ func trade(ctx context.Context, args []string, e env) error {
 	if err := secrets.RequireKite(); err != nil {
 		return usageError{err}
 	}
+	capital, err := resolveCapital(ctx, e, *capitalFlag)
+	if err != nil {
+		return err
+	}
+	limits := tradingLimits(capital)
+	logCapital(logger, capital, limits)
 	jevClient, err := newJev(secrets, *model, *jevURL)
 	if err != nil {
 		return usageError{err}
@@ -149,7 +156,7 @@ func trade(ctx context.Context, args []string, e env) error {
 		source: src, sourceName: "kite", decider: jevClient, deciderName: "jev",
 		logPath: *logPath, dataDir: *dataDir, stateDir: *stateDir,
 		indexToken: indexToken, record: *record, buffer: *buffer, decideTimeout: *decideTimeout,
-		limits: risk.DefaultLimits(), clock: clock.Wall{}, logger: logger,
+		limits: limits, clock: clock.Wall{}, logger: logger, instruments: len(symbols),
 	})
 }
 
@@ -223,6 +230,7 @@ type tradeConfig struct {
 	limits        risk.Limits
 	clock         clock.Clock
 	logger        *slog.Logger
+	instruments   int // traded instruments, for the log
 }
 
 // tradeSession runs the engine on the wall clock with the paper broker until
@@ -256,7 +264,7 @@ func tradeSession(ctx context.Context, rc tradeConfig) (err error) {
 		RunID: rc.runID, Mode: rc.mode, DeciderName: rc.deciderName, SourceName: rc.sourceName,
 		Source: rc.source, Clock: rc.clock, Decider: rc.decider, Broker: broker, Gate: gate, Log: log,
 		Bars:       bars.Config{},
-		Snapshot:   snapshot.Config{SizeThresholds: [2]float64{rc.limits.SizeNotional[domain.SizeS], rc.limits.SizeNotional[domain.SizeM]}},
+		Snapshot:   snapshot.Config{SizeThresholds: sizeThresholds(rc.limits)},
 		IndexToken: rc.indexToken, DecideTimeout: rc.decideTimeout, AdvanceEvery: time.Second,
 		EventBuffer: rc.buffer, Recorded: recorded, Logger: rc.logger,
 	}
@@ -283,9 +291,9 @@ func tradeSession(ctx context.Context, rc tradeConfig) (err error) {
 	if err != nil {
 		return err
 	}
-	rc.logger.Info("trading", "run", rc.runID, "mode", rc.mode, "decider", rc.deciderName)
+	rc.logger.Info("trading", "run", rc.runID, "mode", rc.mode, "decider", rc.deciderName, "instruments", rc.instruments, "budget", rc.limits.CapitalBudget)
 	res, err := eng.Run(ctx)
-	rc.logger.Info("stopped", "cycles", res.Cycles, "orders", res.OrdersPlaced, "fills", res.Fills, "pnl", res.PnL, "open_positions", len(res.Positions))
+	rc.logger.Info("stopped", "cycles", res.Cycles, "orders", res.OrdersPlaced, "rotations", res.Rotations, "fills", res.Fills, "pnl", res.PnL, "open_positions", len(res.Positions))
 	if errors.Is(err, context.Canceled) {
 		err = nil
 	}

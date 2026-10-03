@@ -9,7 +9,7 @@ import (
 )
 
 // Only the risk gate mints an Approval, so tests ask the real gate for one.
-// The default limits turn a size-M BUY at entryPrice into entryQuantity shares.
+// A budget of 250,000 makes a size-M BUY at entryPrice entryQuantity shares.
 const (
 	entryPrice    = 250.0
 	entryQuantity = 100
@@ -23,7 +23,9 @@ var t0 = time.Date(2026, 10, 5, 10, 0, 0, 0, risk.IST)
 // approveSide has the gate approve a size-M entry for cycle on a fresh book.
 func approveSide(t testing.TB, cycle string, side domain.Action) risk.Approval {
 	t.Helper()
-	g, err := risk.NewGate(risk.DefaultLimits())
+	l := risk.DefaultLimits()
+	l.CapitalBudget = 250_000
+	g, err := risk.NewGate(l)
 	if err != nil {
 		t.Fatal(err)
 	}

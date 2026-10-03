@@ -81,7 +81,7 @@ A signal that is unavailable for the whole run (no pre-open yet, Jev down, no ne
 
 These are priors, not fitted. Every weight, filter and threshold is a flag (`jevtrader screen -h`).
 
-Selection: sort by score (long) or by |score| (`--direction both`), drop scores below `--min-score` (0.05), keep at most `--max-per-sector` (3) per sector so the list is not one trade, take the top `--top` (8). Each entry carries its signals, its reasons in plain text (the signal that moved it most first, then liquidity), and the news items behind it with Jev's numbers.
+Selection: sort by score (long) or by |score| (`--direction both`), drop scores below `--min-score` (0.05), keep at most `--max-per-sector` (8) per sector so the list is not one trade, take the top `--top` (50, up to which the bot trades through the day within its capital budget). Each entry carries its signals, its reasons in plain text (the signal that moved it most first, then liquidity), and the news items behind it with Jev's numbers.
 
 **Direction.** The default is `long`. The risk gate in this repository has `AllowShort: false` (`internal/risk/limits.go`), so a short candidate could not be acted on; `--direction both` exists for when that changes, and marks such entries "short candidate". Changing the gate is out of scope here.
 

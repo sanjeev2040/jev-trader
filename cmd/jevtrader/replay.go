@@ -24,7 +24,6 @@ import (
 	mdreplay "github.com/sanjeev2040/jev-trader/internal/marketdata/replay"
 	"github.com/sanjeev2040/jev-trader/internal/orders/paper"
 	"github.com/sanjeev2040/jev-trader/internal/replay"
-	"github.com/sanjeev2040/jev-trader/internal/risk"
 	"github.com/sanjeev2040/jev-trader/internal/snapshot"
 	"github.com/sanjeev2040/jev-trader/internal/store"
 	"github.com/sanjeev2040/jev-trader/internal/watchlist"
@@ -63,6 +62,7 @@ func replayCmd(ctx context.Context, args []string, e env) error {
 	walkthrough := fs.String("walkthrough", "", `add each run's session to the report, instrument by instrument: "actions" (BUY/SELL answers, risk exits, fills) or "all" (every decision, HOLDs too)`)
 	compare := fs.Bool("compare", false, "add the comparison with the real market: the price after each BUY/SELL, and PnL against buy-and-hold and the hold and momentum baselines (those two are replayed too)")
 	lookahead := fs.String("lookahead", "5m,15m,30m", "with --compare, how long after each BUY/SELL to check the price, comma-separated")
+	capitalFlag := fs.Float64("capital", 0, capitalFlagHelp)
 	deciders := fs.String("deciders", "hold,momentum", "comma-separated deciders: hold, momentum, jev, recorded:<run-id>")
 	logPath := fs.String("log", defaultDecisionLog, "decision log (SQLite) the replay runs are written to")
 	prefix := fs.String("run-prefix", "", "run id prefix; runs are <prefix>-<decider> (default: replay-<UTC time>)")
@@ -164,7 +164,12 @@ func replayCmd(ctx context.Context, args []string, e env) error {
 	if err != nil {
 		return usageError{err}
 	}
-	limits := risk.DefaultLimits()
+	capital, err := resolveCapital(ctx, e, *capitalFlag)
+	if err != nil {
+		return err
+	}
+	limits := tradingLimits(capital)
+	fmt.Fprintf(e.stderr, "jevtrader replay: capital budget ₹%.0f (%s: %s)\n", capital.Amount, capital.Source, capital.Detail)
 	rep, err := replay.Run(ctx, replay.Config{
 		Log: log,
 		NewSource: func() (marketdata.Source, error) {
@@ -172,11 +177,11 @@ func replayCmd(ctx context.Context, args []string, e env) error {
 		},
 		SourceName: string(cfg.Kind), Label: cfg.Label(),
 		Limits: limits, Paper: paper.DefaultConfig(), Bars: bars.Config{},
-		Snapshot:   snapshot.Config{SizeThresholds: [2]float64{limits.SizeNotional[domain.SizeS], limits.SizeNotional[domain.SizeM]}},
+		Snapshot:   snapshot.Config{SizeThresholds: sizeThresholds(limits)},
 		IndexToken: indexToken, RunPrefix: *prefix, Window: window,
 		Latency: *latency, DecideTimeout: *decideTimeout, Horizon: *horizon,
 		Walkthrough: walk, Compare: *compare, Lookahead: horizons,
-		BuyHoldNotional: limits.SizeNotional[domain.SizeM],
+		BuyHoldNotional: buyHoldNotional(limits),
 	}, specs)
 	if err != nil {
 		return err

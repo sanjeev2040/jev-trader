@@ -13,6 +13,9 @@ type Source string
 const (
 	SourceDecision Source = "jev"  // a decider's answer the gate approved
 	SourceRisk     Source = "risk" // a risk-driven exit: square-off, loss limit or kill switch
+	// SourceRotation is the sale of one of the bot's own positions to free
+	// capital for a stronger entry.
+	SourceRotation Source = "rotation"
 )
 
 // Approval is the gate's permission to place exactly one order. Only package

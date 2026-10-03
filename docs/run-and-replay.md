@@ -25,7 +25,7 @@ Builds the day's watchlist and writes `state/watchlist/YYYY-MM-DD.json` (`--out-
 1. **Universe**: NIFTY Midcap 150 and Smallcap 250 constituents (NSE's public index CSVs, cached per day under `--data-dir`), less NIFTY 50 and NIFTY Next 50, less stocks not in the `EQ` series or on NSE's ASM/GSM lists.
 2. **Liquidity** (Kite daily candles): previous-day traded value ≥ ₹10 crore (`--min-value-cr`), average volume ≥ 200,000 (`--min-adv`), previous close ₹50–₹5,000 (`--min-price`, `--max-price`).
 3. **Signals**: *news* from the last 18 hours (`--news-window`) — NSE corporate announcements and five business-news RSS feeds (`--news-sources`) — mapped to the screened companies and scored by Jev with three typed questions (expected impact: Score; material and price-moving: Noul; direction: Choice); *sector* strength from the previous session and, in the final pass, the pre-open; the pre-open *gap*; recent *range*. Combined with the weights `--w-news 0.4 --w-sector 0.25 --w-gap 0.25 --w-range 0.1`; a signal that is unavailable this run is left out rather than counted as zero.
-4. **Output**: the top `--top` (8), at most `--max-per-sector` (3) from one sector, each with its score, signals, plain-text reasons and the news behind it. The summary also prints on stdout.
+4. **Output**: the top `--top` (50), at most `--max-per-sector` (8) from one sector, ranked by likelihood to rise, each with its score, signals, plain-text reasons and the news behind it. The summary also prints on stdout.
 
 `--phase` is `auto` by default: *early* before 09:08 IST (news and the previous session), *final* from 09:08 (adds the pre-open gap and sectoral indices), *historic* for a past `--date` (no pre-open exists; RSS feeds keep no history, so only NSE filings supply news). An early pass does not replace a final file unless `--force`. Daily candles and Jev's news scores are cached for the day, so the second pass is short.
 
@@ -41,6 +41,8 @@ jevtrader run --watchlist-file state/watchlist/2026-10-05.json --watchlist NSE:I
 
 `--watchlist-file` trades the instruments `screen` wrote, but only if the file is for today's IST date; if it is missing, stale or unreadable, `run` logs why and trades `--watchlist` instead. With neither a usable file nor `--watchlist`, `run` refuses to start.
 
+`run` trades the whole picker list for the day (up to 50 mid and small caps) as the session's instruments, within a [capital budget](#capital-budget).
+
 Paper trading on live data. The Jev decider uses the pinned model `jev-1.13.0` unless `--model` names another explicit id (`jev-latest` is rejected). It verifies the saved Kite session, resolves the
 watchlist (and the `NSE:NIFTY 50` index, used only as snapshot context),
 records ticks and closed bars under `--data-dir`, and writes every decision
@@ -51,6 +53,36 @@ kill switch.
 `--mode=live` cannot place orders: it asks the Kite broker's gate, which
 refuses while live trading is not approved in code, and `run` has no live
 wiring behind it anyway. Enabling live trading is a separate, reviewed change.
+
+## Capital budget
+
+The bot trades with a total rupee budget, **₹25,000** unless configured. It is a limit on the capital the bot has at work, and the risk gate (`internal/risk`) enforces it on every order:
+
+- **What counts.** The cost (average price × quantity) of the positions the bot opened, plus its open buy orders. Estimated costs are held back: the usable budget is `budget / (1 + 0.15%)`, so a 25,000 budget has about 24,963 at work at most. The hard gross cap in `risk.DefaultLimits` (₹200,000) is a ceiling above any configured budget.
+- **Sizing.** An entry is sized from the budget: size bucket S, M or L is 5%, 10% or 20% of it (₹1,250, ₹2,500, ₹5,000 at 25,000), never less than one share, clipped to the capital that is free, and to 20% of the budget in one stock. If not even one share fits, the entry is skipped with `budget_full` and says why in the decision log (`committed 24000.00 of budget 25000.00 ...: one share at 1000.00 does not fit`).
+- **Rotation.** When the budget is full and a BUY arrives that is stronger than a position the bot holds, the gate sells that position to free the capital. Only a position the bot opened today and has held for at least 5 minutes can go, only if the BUY's probability beats the probability it was opened at by 0.10, and only the weakest qualifying one, and only if selling it frees enough for one share. The sale is logged as its own cycle (`source risk`, exit reason `rotation`); when it fills, the engine asks the gate again for the BUY (cycle `<id>-rot-buy`, abandoned after 2 minutes), so the capital is never spent twice. Both orders obey the order-rate limits.
+- **Many trades.** Buying and selling the same stock several times a day is allowed across all 50 names, within the order-rate limits (3 a second, 60 a minute, 500 a day) and the daily loss limit (₹5,000), which still halt new entries.
+- **Holdings it did not open are out of bounds.** The bot never sells, modifies or otherwise touches a holding or position it did not open, such as your existing Zerodha holdings. Every position in its book comes from its own fills; anything else is registered as foreign (`Book.SetForeign`), and the gate refuses every order in it (`foreign_position`), counts nothing of it against the budget and never flattens it. `internal/risk/budget_test.go` and `internal/engine/rotation_test.go` test this as an invariant.
+
+### Where the budget comes from
+
+In this order, the first that is set wins:
+
+1. `--capital <rupees>` on `run` and `replay`;
+2. the **Key Vault secret `trading-capital`**, when `JEVTRADER_KEYVAULT` names a vault (locally through your `az login`; on the VM `prepare.sh` reads it with the VM's managed identity and puts it in the environment as `JEVTRADER_TRADING_CAPITAL`);
+3. the environment variable `JEVTRADER_TRADING_CAPITAL`;
+4. the built-in ₹25,000.
+
+`run` logs `capital budget rupees=... source=... from=...` at start and `replay` prints the same on stderr. A value that is present but not a positive number (`lots`, `0`, `-5`) stops the command: it never silently falls back to the default. If the vault cannot be read, the environment variable or the default is used, with a warning.
+
+`trading-capital` is a configuration value, not a credential: it is not redacted and is logged. To change it (the next start of `run` picks it up; a running session keeps the budget it started with):
+
+```sh
+az keyvault secret set --vault-name kv-jev-wpvd3louqq --name trading-capital --value 25000 --output none
+az keyvault secret show --vault-name kv-jev-wpvd3louqq --name trading-capital --query value -o tsv   # check
+```
+
+You need *Key Vault Secrets Officer* on the vault to set it (the *Secrets User* role only reads). On the VM, restart the trading service after changing it: `sudo systemctl restart jevtrader-prepare jevtrader-run`. If the secret is not set, the VM boots with the default.
 
 ## `jevtrader replay`
 
@@ -146,7 +178,7 @@ Build once: `go build -o jevtrader ./cmd/jevtrader` (or prefix the commands belo
 export JEVTRADER_KEYVAULT=kv-jev-wpvd3louqq
 ```
 
-With it set, `login` reads `kite-api-key` and `kite-api-secret`, `backfill` reads `kite-api-key`, `replay` reads `jev-api-key` (only when `jev` is among the deciders), and `run` reads all three, each with `az keyvault secret show --vault-name ... --name ... --query value -o tsv` through your `az login` session. Nothing is written to disk or to an env file, and a value is never printed or logged. If the vault cannot be read for a secret, the matching environment variable (`KITE_API_KEY`, `KITE_API_SECRET`, `JEV_API_KEY`) is used instead, with a warning that names the secret but not its value; if neither has it, the command fails and says what failed. Without `JEVTRADER_KEYVAULT` the environment variables are the only source, as before. `record` still reads `KITE_API_KEY` from the environment.
+With it set, `login` reads `kite-api-key` and `kite-api-secret`, `backfill` reads `kite-api-key`, `replay` reads `jev-api-key` (only when `jev` is among the deciders), and `run` reads all three (`run` and `replay` also read the [`trading-capital` budget](#capital-budget), which is configuration rather than a secret), each with `az keyvault secret show --vault-name ... --name ... --query value -o tsv` through your `az login` session. Nothing is written to disk or to an env file, and a value is never printed or logged. If the vault cannot be read for a secret, the matching environment variable (`KITE_API_KEY`, `KITE_API_SECRET`, `JEV_API_KEY`) is used instead, with a warning that names the secret but not its value; if neither has it, the command fails and says what failed. Without `JEVTRADER_KEYVAULT` the environment variables are the only source, as before. `record` still reads `KITE_API_KEY` from the environment.
 
 ### 2. Log in to Kite
 

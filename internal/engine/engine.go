@@ -84,6 +84,10 @@ type Config struct {
 
 	// Book is the risk book; nil means an empty one.
 	Book *risk.Book
+	// Foreign are holdings and positions the bot did not open. The engine
+	// registers them with the book, which keeps them out of the capital
+	// budget and never lets an order, exit or rotation touch them.
+	Foreign []domain.Position
 	// Bars configures the bar builder. Its Base interval is the decision
 	// interval; it defaults to one minute.
 	Bars bars.Config
@@ -143,6 +147,7 @@ type Stats struct {
 	HoldSubstitutions int // cycles whose HOLD replaced a decider failure
 	Approved          int // decisions the risk gate approved
 	Exits             int // risk-driven exit orders
+	Rotations         int // sales of the bot's own positions to free capital for a stronger entry
 	OrdersPlaced      int
 	PlaceFailures     int
 	Fills             int
@@ -181,10 +186,11 @@ type Engine struct {
 	results chan result
 	sem     chan struct{}
 
-	history map[uint32][]domain.Bar // closed decision bars of the current session day
-	pending map[uint32]bool         // instruments with a decision in flight
-	flight  int
-	seq     int
+	history   map[uint32][]domain.Bar // closed decision bars of the current session day
+	pending   map[uint32]bool         // instruments with a decision in flight
+	rotations map[uint32]*rotation    // entries waiting for the sale of the keyed instrument to fill
+	flight    int
+	seq       int
 
 	stats Stats
 
@@ -239,20 +245,24 @@ func New(cfg Config) (*Engine, error) {
 		base = time.Minute
 	}
 	e := &Engine{
-		cfg:     cfg,
-		log:     cfg.Logger.With("run", cfg.RunID),
-		clk:     cfg.Clock,
-		gate:    cfg.Gate,
-		book:    cfg.Book,
-		mgr:     mgr,
-		updates: cfg.Broker.Updates(),
-		builder: builder,
-		aliases: snapshot.NewAliases(),
-		base:    base,
-		results: make(chan result, cfg.MaxInFlight),
-		sem:     make(chan struct{}, cfg.MaxInFlight),
-		history: make(map[uint32][]domain.Bar),
-		pending: make(map[uint32]bool),
+		cfg:       cfg,
+		log:       cfg.Logger.With("run", cfg.RunID),
+		clk:       cfg.Clock,
+		gate:      cfg.Gate,
+		book:      cfg.Book,
+		mgr:       mgr,
+		updates:   cfg.Broker.Updates(),
+		builder:   builder,
+		aliases:   snapshot.NewAliases(),
+		base:      base,
+		results:   make(chan result, cfg.MaxInFlight),
+		sem:       make(chan struct{}, cfg.MaxInFlight),
+		history:   make(map[uint32][]domain.Bar),
+		pending:   make(map[uint32]bool),
+		rotations: make(map[uint32]*rotation),
+	}
+	for _, p := range cfg.Foreign {
+		cfg.Book.SetForeign(p)
 	}
 	e.settable, _ = cfg.Clock.(clock.Settable)
 	e.feed, _ = cfg.Broker.(Feed)

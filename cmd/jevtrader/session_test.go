@@ -166,7 +166,7 @@ func TestReplayIndexByTokenForSymbollessBackfill(t *testing.T) {
 	}
 	// By token it is, and it is not traded; rows name the token for lack of a symbol.
 	rep, warn = replayJSON("--index", "256265")
-	if warn != "" {
+	if strings.Contains(warn, "no index context") {
 		t.Errorf("stderr = %q", warn)
 	}
 	insts := rep.Walkthrough[0].Instruments
@@ -224,8 +224,12 @@ func TestKeyVaultFeedsLocalCommands(t *testing.T) {
 	if code := run(context.Background(), args, e); code != 0 {
 		t.Fatalf("replay exit %d: %s", code, stderr.String())
 	}
-	if fmt.Sprint(calls) != "[jev-api-key]" {
-		t.Errorf("vault reads = %v, want only jev-api-key", calls)
+	// The vault also holds the trading capital, which is not a secret but is read the same way.
+	if fmt.Sprint(calls) != "[jev-api-key trading-capital]" {
+		t.Errorf("vault reads = %v, want jev-api-key and trading-capital", calls)
+	}
+	if !strings.Contains(stderr.String(), "capital budget ₹25000 (default") {
+		t.Errorf("stderr %q does not name the capital budget and that the unreadable vault fell back to the default", stderr.String())
 	}
 	if strings.Contains(stdout.String()+stderr.String(), "vault-jev-secret") {
 		t.Error("the secret was printed")
