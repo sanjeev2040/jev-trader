@@ -233,6 +233,9 @@ func (e *Engine) onResult(ctx context.Context, r result) error {
 			e.stats.HoldSubstitutions++
 		}
 	}
+	if sale, rotating := verdict.Rotation(); rotating {
+		return e.startRotation(ctx, c, d, sale, now)
+	}
 	if !approved {
 		return nil
 	}

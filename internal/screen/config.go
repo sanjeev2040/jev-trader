@@ -97,11 +97,19 @@ type Config struct {
 	CacheDir string
 }
 
+// DefaultTopN is how many instruments the list holds. The bot trades up to this
+// many mid and small caps through the day within its capital budget.
+const DefaultTopN = 50
+
+// DefaultMaxPerSector keeps a 50-name list from being one sector's trade: about
+// one in six names at most. NSE's macro industries number about twenty.
+const DefaultMaxPerSector = 8
+
 // DefaultConfig returns the defaults; the caller sets Date, Now, Phase and CacheDir.
 func DefaultConfig() Config {
 	return Config{
-		TopN: 8, Direction: "long", Weights: DefaultWeights(), Filters: DefaultFilters(),
-		MaxPerSector: 3, MinScore: 0.05, MinSectorMembers: 3, GapScale: 2, SectorScale: 1.5,
+		TopN: DefaultTopN, Direction: "long", Weights: DefaultWeights(), Filters: DefaultFilters(),
+		MaxPerSector: DefaultMaxPerSector, MinScore: 0.05, MinSectorMembers: 3, GapScale: 2, SectorScale: 1.5,
 		NewsWindow: 18 * time.Hour, NewsHalfLife: 24 * time.Hour, MaxNewsItems: 150,
 		MaxSymbolsPerItem: 3, NewsConcurrency: 4, SectorIndexes: DefaultSectorIndexes(),
 	}

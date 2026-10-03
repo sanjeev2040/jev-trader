@@ -264,7 +264,7 @@ func baseConfig(t *testing.T, phase string, now time.Time) Config {
 	cfg := DefaultConfig()
 	cfg.Date, cfg.Now, cfg.Phase = testDay, now, phase
 	cfg.CacheDir = t.TempDir()
-	cfg.TopN = 6
+	cfg.TopN, cfg.MaxPerSector = 6, 3
 	cfg.SectorIndexes = map[string]string{"Information Technology": "NSE:NIFTY IT"}
 	return cfg
 }

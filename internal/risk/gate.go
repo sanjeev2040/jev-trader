@@ -28,9 +28,11 @@ const (
 	ReasonOrderInFlight    Reason = "order_in_flight"
 	ReasonShortNotAllowed  Reason = "short_not_allowed"
 	ReasonNoPrice          Reason = "no_price"
-	ReasonSizeTooSmall     Reason = "size_too_small"
 	ReasonPositionCap      Reason = "position_cap"
 	ReasonGrossCap         Reason = "gross_cap"
+	ReasonBudgetFull       Reason = "budget_full"      // not one share fits in the capital that is free
+	ReasonForeignPosition  Reason = "foreign_position" // the instrument holds something the bot did not open
+	ReasonRotation         Reason = "rotation"         // the budget is full: an open position is being sold to make room
 	ReasonOrderRate        Reason = "order_rate_limit"
 	ReasonDailyOrderBudget Reason = "daily_order_budget"
 )
@@ -53,13 +55,17 @@ type Request struct {
 	CycleID    string // decision cycle id, carried into the order intent
 	Instrument domain.Instrument
 	Decision   domain.Decision
+	// Rotated says capital was freed for this entry by a rotation, so the
+	// gate must not rotate again if the entry still does not fit.
+	Rotated bool
 }
 
 // Verdict is the gate's answer to a Request.
 type Verdict struct {
-	Reason   Reason // ReasonApproved, or the first check that refused
+	Reason   Reason // ReasonApproved, ReasonRotation, or the first check that refused
 	Detail   string // human-readable context for the decision log
 	approval Approval
+	rotation Approval
 }
 
 // Approved reports whether the verdict carries an Approval.
@@ -67,6 +73,12 @@ func (v Verdict) Approved() bool { return v.approval.Valid() }
 
 // Approval returns the approval, if the order was approved.
 func (v Verdict) Approval() (Approval, bool) { return v.approval, v.approval.Valid() }
+
+// Rotation returns the approval to sell one of the bot's own positions, if the
+// budget was full and the gate chose to rotate. The entry itself is not
+// approved yet: the capital is only free once the sale fills, and the caller
+// then asks the gate again with Request.Rotated set.
+func (v Verdict) Rotation() (Approval, bool) { return v.rotation, v.rotation.Valid() }
 
 // ExitPlan is the set of risk-driven exits due now.
 type ExitPlan struct {
@@ -91,7 +103,7 @@ func NewGate(limits Limits) (*Gate, error) {
 		return nil, fmt.Errorf("risk limits: %w", err)
 	}
 	limits.MinProbability = maps.Clone(limits.MinProbability)
-	limits.SizeNotional = maps.Clone(limits.SizeNotional)
+	limits.SizeFraction = maps.Clone(limits.SizeFraction)
 	limits.Location = limits.location()
 	return &Gate{limits: limits}, nil
 }
@@ -100,7 +112,7 @@ func NewGate(limits Limits) (*Gate, error) {
 func (g *Gate) Limits() Limits {
 	l := g.limits
 	l.MinProbability = maps.Clone(l.MinProbability)
-	l.SizeNotional = maps.Clone(l.SizeNotional)
+	l.SizeFraction = maps.Clone(l.SizeFraction)
 	return l
 }
 
@@ -111,8 +123,17 @@ func (g *Gate) Limits() Limits {
 //  2. session window (new entries only);
 //  3. daily loss limit (new entries only);
 //  4. probability threshold for the chosen action;
-//  5. one order in flight per instrument, shorts, and position caps;
+//  5. one order in flight per instrument, shorts, the position cap and the
+//     capital budget;
 //  6. order-rate limits and the daily order budget.
+//
+// An instrument holding something the bot did not open is refused outright,
+// before any other check: the bot only ever trades its own positions.
+//
+// An entry is sized from the capital budget: the size bucket's share of the
+// budget, at least one share, clipped to the capital that is free. If not even
+// one share fits, the gate may sell one of the bot's own positions to make
+// room (see Verdict.Rotation); otherwise the entry is refused.
 //
 // A BUY against a short or a SELL against a long closes the whole position
 // and never reverses it; it is exempt from the session window, the loss
@@ -138,6 +159,9 @@ func (g *Gate) Evaluate(req Request, b *Book, now time.Time) Verdict {
 	}
 
 	token := req.Instrument.Token
+	if b.IsForeign(token) {
+		return refuse(ReasonForeignPosition, "token %d holds a position the bot did not open and is never traded", token)
+	}
 	pos := b.positions[token].Quantity
 	reduce := (d.Action == domain.ActionSell && pos > 0) || (d.Action == domain.ActionBuy && pos < 0)
 
@@ -162,6 +186,7 @@ func (g *Gate) Evaluate(req Request, b *Book, now time.Time) Verdict {
 		return refuse(ReasonOrderInFlight, "an order for token %d is still open", token)
 	}
 	var qty int64
+	var sized string
 	price := b.marks[token]
 	if reduce {
 		qty = abs(pos)
@@ -169,22 +194,37 @@ func (g *Gate) Evaluate(req Request, b *Book, now time.Time) Verdict {
 		if d.Action == domain.ActionSell && !l.AllowShort {
 			return refuse(ReasonShortNotAllowed, "SELL with no long position and shorts disabled")
 		}
-		notional, ok := l.SizeNotional[d.Size]
+		target, ok := l.EntryNotional(d.Size)
 		if !ok {
 			return refuse(ReasonInvalidDecision, "unknown size bucket %q", d.Size)
 		}
 		if !(price > 0) {
 			return refuse(ReasonNoPrice, "no last price for token %d", token)
 		}
-		qty = int64(math.Floor(notional / price))
-		if qty < 1 {
-			return refuse(ReasonSizeTooSmall, "size %s (%.2f) buys no shares at %.2f", d.Size, notional, price)
+		// At least one share, then clipped to the position cap and the free capital.
+		qty = max(int64(math.Floor(target/price)), 1)
+		held := float64(abs(pos)) * price
+		if room := int64(math.Floor((l.PositionCap() - held) / price)); room < qty {
+			if room < 1 {
+				return refuse(ReasonPositionCap, "position notional %.2f plus one share at %.2f over cap %.2f", held, price, l.PositionCap())
+			}
+			qty = room
 		}
-		if n := float64(abs(pos)+qty) * price; n > l.MaxPositionNotional {
-			return refuse(ReasonPositionCap, "position notional %.2f over cap %.2f", n, l.MaxPositionNotional)
-		}
-		if n := b.grossExposure() + float64(qty)*price; n > l.MaxGrossNotional {
-			return refuse(ReasonGrossCap, "gross notional %.2f over cap %.2f", n, l.MaxGrossNotional)
+		free := l.Budget() - b.Committed()
+		if fit := int64(math.Floor(free / price)); fit < qty {
+			if fit < 1 {
+				if l.MaxGrossNotional < l.CapitalBudget/(1+l.CostReserveRate) {
+					return refuse(ReasonGrossCap, "committed %.2f of hard gross cap %.2f: one share at %.2f does not fit", b.Committed(), l.MaxGrossNotional, price)
+				}
+				if !req.Rotated {
+					if v, ok := g.rotate(req, b, price, now); ok {
+						return v
+					}
+				}
+				return refuse(ReasonBudgetFull, "committed %.2f of budget %.2f (%.2f after estimated costs): one share at %.2f does not fit", b.Committed(), l.CapitalBudget, l.Budget(), price)
+			}
+			qty = fit
+			sized = fmt.Sprintf("sized to free capital %.2f of budget %.2f", free, l.CapitalBudget)
 		}
 	}
 	// 6. Order rate and daily budget.
@@ -208,7 +248,66 @@ func (g *Gate) Evaluate(req Request, b *Book, now time.Time) Verdict {
 	}
 	b.record(intent, now)
 	b.dayOrders++
-	return Verdict{Reason: ReasonApproved, approval: newApproval(intent, SourceDecision, ReasonApproved, now)}
+	if !reduce {
+		b.noteEntry(token, d.Probability, now)
+	}
+	return Verdict{Reason: ReasonApproved, Detail: sized, approval: newApproval(intent, SourceDecision, ReasonApproved, now)}
+}
+
+// rotate sells the bot's weakest eligible position to make room for the entry
+// in req, whose one share does not fit in the free capital. A position is
+// eligible only if the bot opened it today, it has been held for
+// RotationMinHold, it has no order in flight, the entry's probability beats
+// the probability it was opened at by RotationMargin, and selling it frees
+// enough for one share. It checks the same limits as any other order; it
+// returns false when nothing qualifies.
+func (g *Gate) rotate(req Request, b *Book, price float64, now time.Time) (Verdict, bool) {
+	l := g.limits
+	d := req.Decision
+	need := price - (l.Budget() - b.Committed())
+	var victim domain.Position
+	var weakest float64
+	var found bool
+	for _, p := range b.Positions() { // by token, so ties break the same way every run
+		token := p.Instrument.Token
+		e, ok := b.entries[token]
+		switch {
+		case !ok, p.Quantity <= 0, b.InFlight(token), b.IsForeign(token), token == req.Instrument.Token:
+			continue // not provably opened by the bot today, or not a plain long
+		case e.at.In(l.Location).Format(time.DateOnly) != now.Format(time.DateOnly), now.Sub(e.at) < l.RotationMinHold:
+			continue
+		case d.Probability < e.probability+l.RotationMargin:
+			continue
+		case float64(p.Quantity)*p.AvgPrice < need:
+			continue
+		}
+		if !found || e.probability < weakest {
+			victim, weakest, found = p, e.probability, true
+		}
+	}
+	if !found {
+		return Verdict{}, false
+	}
+	if reason, _ := g.rateLimited(b, now); reason != "" {
+		return Verdict{}, false
+	}
+	if b.dayOrders >= l.MaxOrdersPerDay {
+		return Verdict{}, false
+	}
+	token := victim.Instrument.Token
+	intent := domain.OrderIntent{
+		CycleID:    fmt.Sprintf("%s-rot-%d", req.CycleID, token),
+		Instrument: victim.Instrument,
+		Side:       domain.ActionSell,
+		Quantity:   victim.Quantity,
+		RefPrice:   b.price(token),
+		ReduceOnly: true,
+	}
+	b.record(intent, now)
+	b.dayOrders++
+	detail := fmt.Sprintf("budget %.2f is full: selling %s (opened at probability %.2f) to make room for %s at probability %.2f",
+		l.CapitalBudget, victim.Instrument.Symbol, weakest, req.Instrument.Symbol, d.Probability)
+	return Verdict{Reason: ReasonRotation, Detail: detail, rotation: newApproval(intent, SourceRotation, ReasonRotation, now)}, true
 }
 
 // Exits returns the risk-driven exits due at time now. While the kill switch

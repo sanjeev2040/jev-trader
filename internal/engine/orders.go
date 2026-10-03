@@ -20,11 +20,14 @@ func (e *Engine) submit(ctx context.Context, a risk.Approval, cycleID string) er
 		e.log.Error("order not placed", "cycle", cycleID, "err", err)
 		e.book.Settle(intent.Instrument.Token)
 		e.gate.NoteRejection(e.book)
-		return e.cfg.Log.AppendOrderEvent(ctx, decisionlog.OrderEvent{
+		if err := e.cfg.Log.AppendOrderEvent(ctx, decisionlog.OrderEvent{
 			RunID: e.cfg.RunID, CycleID: cycleID, ClientID: orders.ClientID(cycleID),
 			Instrument: intent.Instrument, Side: intent.Side,
 			Status: decisionlog.StatusPlaceFailed, Reason: err.Error(), Time: e.clk.Now(),
-		})
+		}); err != nil {
+			return err
+		}
+		return e.resumeRotation(ctx, intent.Instrument.Token)
 	}
 	e.stats.OrdersPlaced++
 	return e.drain(ctx)
@@ -71,6 +74,18 @@ func (e *Engine) onUpdate(ctx context.Context, u domain.OrderUpdate) error {
 	case domain.OrderStatusFilled, domain.OrderStatusCancelled:
 		e.book.Settle(token)
 	}
+	if err := e.logUpdate(ctx, o, u, fill); err != nil {
+		return err
+	}
+	if u.Status == domain.OrderStatusFilled || u.Status == domain.OrderStatusCancelled || u.Status == domain.OrderStatusRejected {
+		// A sale that made room for a stronger entry has settled: go on with the entry.
+		return e.resumeRotation(ctx, token)
+	}
+	return nil
+}
+
+// logUpdate appends a broker update to the decision log.
+func (e *Engine) logUpdate(ctx context.Context, o orders.Order, u domain.OrderUpdate, fill *domain.Fill) error {
 	return e.cfg.Log.AppendOrderEvent(ctx, decisionlog.OrderEvent{
 		RunID: e.cfg.RunID, CycleID: o.Intent.CycleID, ClientID: orders.ClientID(o.Intent.CycleID), BrokerID: u.BrokerID,
 		Instrument: o.Intent.Instrument, Side: o.Intent.Side, Status: string(u.Status),

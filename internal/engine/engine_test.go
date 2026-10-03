@@ -77,6 +77,15 @@ type rig struct {
 	cfg    Config
 }
 
+// testLimits are the default limits with a 200,000 budget, so a size-S entry is
+// 10,000 and the engine tests trade a few shares of a stock near 1,500.
+func testLimits() risk.Limits {
+	l := risk.DefaultLimits()
+	l.CapitalBudget = 200_000
+	l.SizeFraction[domain.SizeS] = 0.05
+	return l
+}
+
 func newRig(t *testing.T, events []marketdata.Event, d decide.Decider) *rig {
 	t.Helper()
 	log, err := decisionlog.Open(":memory:", decisionlog.Options{})
@@ -89,7 +98,7 @@ func newRig(t *testing.T, events []marketdata.Event, d decide.Decider) *rig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gate, err := risk.NewGate(risk.DefaultLimits())
+	gate, err := risk.NewGate(testLimits())
 	if err != nil {
 		t.Fatal(err)
 	}

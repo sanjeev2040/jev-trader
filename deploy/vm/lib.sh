@@ -43,3 +43,26 @@ retry() {
   done
   return 1
 }
+
+# fetch_trading_capital: needs kv_token and KEY_VAULT_NAME (see prepare.sh).
+# trading-capital is configuration, not a credential: the total rupee budget the
+# bot may have at work. It is optional, so that a vault without it still boots
+# (jevtrader then uses its built-in default); a missing secret (404) is skipped,
+# but any other failure stops the boot rather than trade on a budget nobody chose.
+fetch_trading_capital() {
+  local body code value
+  body=$(mktemp "$RUN_DIR/capital.XXXXXX")
+  code=$(curl -sS --max-time 20 -o "$body" -w '%{http_code}' -H "Authorization: Bearer $kv_token" \
+    "https://$KEY_VAULT_NAME.vault.azure.net/secrets/trading-capital?api-version=7.4") ||
+    { rm -f "$body"; die "cannot reach Key Vault $KEY_VAULT_NAME to read 'trading-capital'"; }
+  case "$code" in
+    200) value=$(jq -er .value < "$body") || { rm -f "$body"; die "secret 'trading-capital' has no value"; } ;;
+    404) rm -f "$body"; log "secret 'trading-capital' is not set; jevtrader uses its default budget"; return 0 ;;
+    *) rm -f "$body"; die "cannot read secret 'trading-capital' from Key Vault $KEY_VAULT_NAME (HTTP $code)" ;;
+  esac
+  rm -f "$body"
+  [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]] ||
+    die "secret 'trading-capital' is '$value', not a positive number of rupees such as 25000"
+  log "trading capital is $value rupees (Key Vault secret trading-capital)"
+  printf 'JEVTRADER_TRADING_CAPITAL=%s\n' "$value"
+}
