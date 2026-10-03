@@ -124,7 +124,7 @@ func TestBackfillChunksLongRanges(t *testing.T) {
 	kite := kiteconnect.New("key")
 	kite.SetAccessToken("secret-token")
 	kite.SetBaseURI(srv.URL)
-	job, err := parseBackfill("2,1", "2026-01-01", "2026-03-15", "", t.TempDir())
+	job, err := parseBackfill("2,1", "", "2026-01-01", "2026-03-15", "", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func (failingKite) GetHistoricalData(int, string, time.Time, time.Time, bool, bo
 
 func TestBackfillErrors(t *testing.T) {
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
-	job, err := parseBackfill("1", "2026-09-01", "", "5m", t.TempDir())
+	job, err := parseBackfill("1", "", "2026-09-01", "", "5m", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,11 +196,11 @@ func TestParseBackfill(t *testing.T) {
 		{"1", "2026-09-01", "", "5m,5m"},
 	}
 	for _, tc := range bad {
-		if _, err := parseBackfill(tc.tokens, tc.from, tc.to, tc.derive, "data"); err == nil {
+		if _, err := parseBackfill(tc.tokens, "", tc.from, tc.to, tc.derive, "data"); err == nil {
 			t.Errorf("parseBackfill(%+v) accepted", tc)
 		}
 	}
-	job, err := parseBackfill(" 5, 3,5 ", "2026-09-01", "", "5m,15m", "data")
+	job, err := parseBackfill(" 5, 3,5 ", "", "2026-09-01", "", "5m,15m", "data")
 	if err != nil {
 		t.Fatal(err)
 	}

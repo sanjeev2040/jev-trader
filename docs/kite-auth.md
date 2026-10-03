@@ -14,6 +14,8 @@ Kite access tokens expire at 06:00 IST every day, or earlier after a logout. Eac
    | `KITE_API_SECRET` | `login` (token exchange) |
    | `JEV_API_KEY` | Jev decisions |
 
+   Locally you can instead set `JEVTRADER_KEYVAULT=<vault name>`: `login`, `backfill`, `replay` and `run` then read `kite-api-key`, `kite-api-secret` and `jev-api-key` from Azure Key Vault through your `az login` session, falling back to these variables; see [run-and-replay.md](run-and-replay.md#runbook-paper-trade-a-past-day-locally).
+
    In production, load them with systemd's `EnvironmentFile=` from a `0600` file outside the repository. Locally, keep them in `.env` (ignored by git) and export them with `set -a; . ./.env; set +a`. Secrets and the access token are held in a type that formats, logs and marshals as `[redacted]`. The API key does appear in the printed login URL, because Kite's login page needs it.
 
 ## Daily login
