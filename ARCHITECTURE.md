@@ -196,7 +196,7 @@ flowchart TD
 
 - **Two passes.** `early` runs at 08:30 on news and the previous session; `final` runs at 09:08:30 and adds the pre-open gap and sectoral indices (`final=true` in the file). An early pass never replaces a final file unless `--force`. Daily candles and Jev's news scores are cached for the day, so the second pass is short.
 - **A past `--date`** uses the `historic` phase: no pre-open exists and only NSE filings supply news.
-- **The fallback is deliberate.** Whatever the screen does, `run` starts. If the file is missing, stale or unreadable, it trades the static `watchlist` from the deployment parameters, and it refuses to start only when it has neither.
+- **The fallback is deliberate.** Whatever the screen does, `run` starts (on a quiet day with an empty list it idles rather than trading the static list). If the file is missing, stale or unreadable, it trades the static `watchlist` from the deployment parameters, and it refuses to start only when it has neither.
 - **Needs** a Kite session and `KITE_API_KEY`; without `JEV_API_KEY` the news is fetched but not scored.
 
 ## Secrets and configuration

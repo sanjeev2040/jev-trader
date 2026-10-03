@@ -5,7 +5,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the system overview and the diagrams 
 
 ## Watchlist
 
-`jevtrader screen` picks the day's instruments before the session: NIFTY Midcap 150 and Smallcap 250 stocks (not NIFTY 50 or Next 50) that are liquid enough for intraday, ranked on news scored by Jev (a material positive news catalyst is required by default) and the pre-open gap. `jevtrader run --watchlist-file` trades the list and falls back to the static `--watchlist`. See [docs/run-and-replay.md](docs/run-and-replay.md#jevtrader-screen) and [reports/0004-watchlist.md](reports/0004-watchlist.md).
+`jevtrader screen` picks the day's instruments before the session: NIFTY Midcap 150 and Smallcap 250 stocks (not NIFTY 50 or Next 50) that are liquid enough for intraday, ranked on news scored by Jev (a material positive news catalyst is required by default) and the pre-open gap. `jevtrader run --watchlist-file` trades the list (idling on a quiet day with no catalysts) and falls back to the static `--watchlist` when the file is missing, stale or unreadable. See [docs/run-and-replay.md](docs/run-and-replay.md#jevtrader-screen) and [reports/0004-watchlist.md](reports/0004-watchlist.md).
 
 `jevtrader study` backtests the picker over several past weeks against buy-and-hold of the picks and a random list of the same size, with hit rates, calibration, which signals went with the morning's return, and Jev's token cost. See [docs/picker-study.md](docs/picker-study.md) and [reports/0005-picker-study.md](reports/0005-picker-study.md).
 
