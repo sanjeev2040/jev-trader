@@ -9,6 +9,7 @@ package screen
 import (
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/sanjeev2040/jev-trader/internal/watchlist"
@@ -23,16 +24,25 @@ const (
 )
 
 // Weights are the relative weights of the signals. Only their ratios matter:
-// the score is divided by the sum of the weights of the signals available in
-// this run.
+// the score is divided by the sum of the absolute weights of the signals
+// available in this run. A weight of zero leaves the signal out of the score.
+// Range may be negative, which penalises stocks with a wide recent range; the
+// others must not be.
 type Weights struct {
 	News, Sector, Gap, Range float64
 }
 
-// DefaultWeights favours news (the one signal about what is new today), then
-// sector strength and the pre-open gap, with recent range as a small tiebreak
-// that prefers stocks that move enough to trade intraday.
-func DefaultWeights() Weights { return Weights{News: 0.40, Sector: 0.25, Gap: 0.25, Range: 0.10} }
+// DefaultWeights is news first. The picker study of 2026-09-14..10-01 (see
+// reports/0004-watchlist.md) found news the only signal with a rank
+// correlation to the window return (daily IC +0.16, t 4.09), sector strength
+// none (about 0), and a wide recent range a negative one (-0.125), so sector
+// and range carry no weight by default. The pre-open gap could not be
+// studied (a past day has none) and keeps a smaller prior weight.
+func DefaultWeights() Weights { return Weights{News: 0.60, Sector: 0, Gap: 0.25, Range: 0} }
+
+func (w Weights) sumAbs() float64 {
+	return math.Abs(w.News) + math.Abs(w.Sector) + math.Abs(w.Gap) + math.Abs(w.Range)
+}
 
 func (w Weights) asMap() map[string]float64 {
 	return map[string]float64{SignalNews: w.News, SignalSector: w.Sector, SignalGap: w.Gap, SignalRange: w.Range}
@@ -78,6 +88,8 @@ type Config struct {
 	MaxPerSector int
 	// MinScore is the least score (|score| for "both") an entry needs.
 	MinScore float64
+	// Catalyst says what news a stock needs to be listed at all.
+	Catalyst Catalyst
 	// MinSectorMembers is how many liquid members a sector needs for a
 	// sector signal.
 	MinSectorMembers int
@@ -100,6 +112,32 @@ type Config struct {
 	KeepPool bool
 }
 
+// Catalyst is the news a stock must have to enter the list: at least one item
+// in the news window that Jev scored as material, pointing up and large enough
+// to matter. The list is then as long as the day's catalysts, up to TopN, and
+// may be shorter than TopN or empty on a quiet day.
+type Catalyst struct {
+	// Require turns the requirement on. Off, news is only a signal and any
+	// stock whose score clears MinScore can be listed.
+	Require bool
+	// MinMaterial is the least Noul (0..1) an item needs: how likely it is
+	// about this company and price-moving today.
+	MinMaterial float64
+	// MinDirection is the least P(up) - P(down) an item needs.
+	MinDirection float64
+	// MinImpact is the least impact level (0..4: no effect, under 1%, 1-2%,
+	// 2-4%, over 4%) an item needs.
+	MinImpact float64
+}
+
+// DefaultCatalyst requires a catalyst: an item more likely than not material,
+// leaning clearly up, and justifying a move of about 1% or more. Priors, not
+// fitted; the study's evidence is that the signed news signal ranks well, not
+// where this cut falls.
+func DefaultCatalyst() Catalyst {
+	return Catalyst{Require: true, MinMaterial: 0.5, MinDirection: 0.3, MinImpact: 1}
+}
+
 // DefaultTopN is how many instruments the list holds. The bot trades up to this
 // many mid and small caps through the day within its capital budget.
 const DefaultTopN = 50
@@ -111,7 +149,7 @@ const DefaultMaxPerSector = 8
 // DefaultConfig returns the defaults; the caller sets Date, Now, Phase and CacheDir.
 func DefaultConfig() Config {
 	return Config{
-		TopN: DefaultTopN, Direction: "long", Weights: DefaultWeights(), Filters: DefaultFilters(),
+		TopN: DefaultTopN, Direction: "long", Weights: DefaultWeights(), Filters: DefaultFilters(), Catalyst: DefaultCatalyst(),
 		MaxPerSector: DefaultMaxPerSector, MinScore: 0.05, MinSectorMembers: 3, GapScale: 2, SectorScale: 1.5,
 		NewsWindow: 18 * time.Hour, NewsHalfLife: 24 * time.Hour, MaxNewsItems: 150,
 		MaxSymbolsPerItem: 3, NewsConcurrency: 4, SectorIndexes: DefaultSectorIndexes(),
@@ -157,8 +195,15 @@ func (c Config) Validate() error {
 		bad("direction %q is not long or both", c.Direction)
 	}
 	w := c.Weights
-	if w.News < 0 || w.Sector < 0 || w.Gap < 0 || w.Range < 0 || w.News+w.Sector+w.Gap+w.Range <= 0 {
-		bad("weights must be non-negative and not all zero")
+	if w.News < 0 || w.Sector < 0 || w.Gap < 0 || w.sumAbs() <= 0 {
+		bad("weights must not be negative (except the range weight, a penalty) and not all zero")
+	}
+	k := c.Catalyst
+	if k.MinMaterial < 0 || k.MinMaterial > 1 || k.MinDirection < 0 || k.MinDirection > 1 || k.MinImpact < 0 || k.MinImpact > maxImpact {
+		bad("catalyst: need 0 <= material <= 1, 0 <= direction <= 1 and 0 <= impact <= %d", maxImpact)
+	}
+	if k.Require && w.News == 0 {
+		bad("a catalyst is required but the news weight is zero")
 	}
 	f := c.Filters
 	if f.MinPrice < 0 || f.MaxPrice <= f.MinPrice || f.MinPrevValue < 0 || f.MinADV < 0 || f.MinSessions < 2 {

@@ -72,7 +72,7 @@ func TestScreenWritesTheDatedWatchlist(t *testing.T) {
 	out, data := t.TempDir(), t.TempDir()
 	e, stdout, stderr := testEnv(nil)
 	// A past day is always the historic phase, whatever the clock says.
-	args := []string{"screen", "--date", "2020-01-02", "--out-dir", out, "--data-dir", data, "--news-sources", "none", "--top", "2", "--min-score", "0"}
+	args := []string{"screen", "--date", "2020-01-02", "--out-dir", out, "--data-dir", data, "--news-sources", "none", "--require-catalyst=false", "--w-sector", "0.25", "--w-range", "0.1", "--top", "2", "--min-score", "0"}
 	if code := run(context.Background(), args, e); code != 0 {
 		t.Fatalf("code %d, stderr %q", code, stderr.String())
 	}
@@ -99,6 +99,22 @@ func TestScreenWritesTheDatedWatchlist(t *testing.T) {
 	}
 }
 
+// With the defaults a catalyst is required, so a screen that read no news
+// writes no list and fails, leaving `run` on its static list.
+func TestScreenRequiresACatalystByDefault(t *testing.T) {
+	useScreenFixtures(t, screenMarket{})
+	out := t.TempDir()
+	e, _, stderr := testEnv(nil)
+	args := []string{"screen", "--date", "2020-01-02", "--out-dir", out, "--data-dir", t.TempDir(), "--news-sources", "none"}
+	if code := run(context.Background(), args, e); code != 1 || !strings.Contains(stderr.String(), "news catalyst") {
+		t.Fatalf("code %d, stderr %q", code, stderr.String())
+	}
+	e, _, stderr = testEnv(nil)
+	if code := run(context.Background(), append(args, "--w-news", "0"), e); code != 2 || !strings.Contains(stderr.String(), "news weight is zero") {
+		t.Fatalf("code %d, stderr %q", code, stderr.String())
+	}
+}
+
 func TestEarlyScreenKeepsAFinalWatchlistUnlessForced(t *testing.T) {
 	useScreenFixtures(t, screenMarket{})
 	out := t.TempDir()
@@ -108,7 +124,7 @@ func TestEarlyScreenKeepsAFinalWatchlistUnlessForced(t *testing.T) {
 	if err := watchlist.Write(path, final); err != nil {
 		t.Fatal(err)
 	}
-	args := []string{"screen", "--phase", "early", "--out-dir", out, "--data-dir", t.TempDir(), "--news-sources", "none", "--min-score", "0"}
+	args := []string{"screen", "--phase", "early", "--out-dir", out, "--data-dir", t.TempDir(), "--news-sources", "none", "--require-catalyst=false", "--w-sector", "0.25", "--w-range", "0.1", "--min-score", "0"}
 
 	e, stdout, stderr := testEnv(nil)
 	if code := run(context.Background(), args, e); code != 0 {

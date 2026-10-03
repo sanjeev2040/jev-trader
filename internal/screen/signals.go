@@ -47,12 +47,14 @@ func percentileSignals(values map[string]float64) map[string]float64 {
 // combine returns the weighted score of a stock's signals, and the weighted
 // contribution of each. A signal missing for the stock counts as 0; weights of
 // signals unavailable for the whole run are left out of avail so that they do
-// not dilute the rest.
+// not dilute the rest. The scale is the sum of absolute weights, so a negative
+// weight (a penalty) lowers the score without shrinking the others. A signal
+// with weight zero contributes nothing and is not reported.
 func combine(w map[string]float64, avail map[string]bool, signals map[string]float64) (score float64, contrib map[string]float64) {
 	total := 0.0
 	for name, weight := range w {
 		if avail[name] {
-			total += weight
+			total += math.Abs(weight)
 		}
 	}
 	contrib = map[string]float64{}
@@ -60,7 +62,7 @@ func combine(w map[string]float64, avail map[string]bool, signals map[string]flo
 		return 0, contrib
 	}
 	for name, weight := range w {
-		if !avail[name] {
+		if !avail[name] || weight == 0 {
 			continue
 		}
 		c := weight / total * signals[name]

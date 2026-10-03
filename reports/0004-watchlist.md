@@ -1,8 +1,8 @@
 # 0004 — Pre-market watchlist: mid and small caps picked from news, sector strength and the pre-open
 
-- **Status:** Proposed (implemented in the PR that closes #41; weights and thresholds are priors, not tuned)
+- **Status:** Proposed (implemented in the PR that closes #41; weights and thresholds are priors, not tuned). Ranking revised on the evidence of the picker study by the PR that closes #52: see [Revision: rebuilt around news catalysts](#revision-rebuilt-around-news-catalysts)
 - **Date:** 2026-10-03
-- **Issue:** [#41](https://github.com/sanjeev2040/jev-trader/issues/41)
+- **Issue:** [#41](https://github.com/sanjeev2040/jev-trader/issues/41); ranking revised in [#52](https://github.com/sanjeev2040/jev-trader/issues/52)
 - **Depends on:** [0002 — System architecture](0002-architecture.md), [0003 — Deployment](0003-deployment.md)
 - **Decider:** repository owner
 
@@ -70,18 +70,20 @@ Item recency halves every 24 h (`--news-window` is 18 h by default, so the oldes
 score = Σ weight_s × signal_s / Σ weight_s     over the signals available this run
 ```
 
-A signal that is unavailable for the whole run (no pre-open yet, Jev down, no news source readable) is left out of the denominator, so it does not drag every score toward zero. A stock that merely has no news counts as 0 for the news signal.
+A signal that is unavailable for the whole run (no pre-open yet, Jev down, no news source readable) is left out of the denominator, so it does not drag every score toward zero. A stock that merely has no news counts as 0 for the news signal. The denominator is the sum of the absolute weights, so a negative weight (a penalty) lowers a score without shrinking the others, and a signal with weight zero is not computed into the score or reported in the reasons.
 
-| Weight | Default | Reasoning |
-| --- | --- | --- |
-| news | 0.40 | the only signal that says something new happened to this company |
-| sector | 0.25 | the captain's "which group will grow" |
-| gap | 0.25 | the market's own verdict at 09:08, the freshest evidence |
-| range | 0.10 | a tiebreak towards stocks that can move enough to cover costs |
+| Weight | Default | Flag | Reasoning |
+| --- | --- | --- | --- |
+| news | 0.60 | `--w-news` | the only signal that says something new happened to this company, and the only one the study found to predict (see the revision below) |
+| sector | 0 | `--w-sector` | no relation to the window return in the study |
+| gap | 0.25 | `--w-gap` | the market's own verdict at 09:08, the freshest evidence; it could not be studied (a past day has no pre-open), so it keeps a prior weight |
+| range | 0 | `--w-range` | wide-range stocks did worse in the study; a negative value penalises them |
 
-These are priors, not fitted. Every weight, filter and threshold is a flag (`jevtrader screen -h`).
+The first version of this table was news 0.40, sector 0.25, gap 0.25, range 0.10, all priors. These are still priors where the study did not speak (gap, and the size of the news weight against it). Every weight, filter and threshold is a flag (`jevtrader screen -h`).
 
-Selection: sort by score (long) or by |score| (`--direction both`), drop scores below `--min-score` (0.05), keep at most `--max-per-sector` (8) per sector so the list is not one trade, take the top `--top` (50, up to which the bot trades through the day within its capital budget). Each entry carries its signals, its reasons in plain text (the signal that moved it most first, then liquidity), and the news items behind it with Jev's numbers.
+**Catalyst requirement.** By default a stock enters the list only if at least one news item in the window about it was scored by Jev as a catalyst: `material` ≥ 0.5 (`--catalyst-material`), `direction` (P(UP) − P(DOWN)) ≥ 0.3 (`--catalyst-direction`) and `impact` level ≥ 1, about a 1% move or more (`--catalyst-impact`). `--require-catalyst=false` ranks every screened stock as before. The list is then as long as the day's catalysts, up to `--top`, and **may be shorter than 50 on a quiet day, or empty**. An empty list is a failed screen (exit 1) and `run` trades the static `--watchlist`, as for any screen that finds nothing. The same happens when no news could be scored (Jev down, no key, no readable source): with the requirement on, no stock can qualify, and the file's notes say so. Negative news is not a catalyst, so `--direction both` lists no short candidates while the requirement is on. The thresholds are priors; the study measured the news signal's ranking power, not where this cut falls.
+
+Selection: drop stocks without a catalyst (unless `--require-catalyst=false`), sort by score (long) or by |score| (`--direction both`), drop scores below `--min-score` (0.05), keep at most `--max-per-sector` (8) per sector so the list is not one trade, take the top `--top` (50, up to which the bot trades through the day within its capital budget). Each entry carries its signals, its reasons in plain text (the signal that moved it most first, then liquidity), and the news items behind it with Jev's numbers.
 
 **Direction.** The default is `long`. The risk gate in this repository has `AllowShort: false` (`internal/risk/limits.go`), so a short candidate could not be acted on; `--direction both` exists for when that changes, and marks such entries "short candidate". Changing the gate is out of scope here.
 
@@ -156,13 +158,53 @@ The pre-market run does not change the VM's schedule or size.
 | NSE index files | no list; `screen` exits 1; `run` uses the static list |
 | ASM/GSM report | the list is built without that exclusion and the file says so in `notes` and `sources` |
 | a news source | that source's items are missing; `sources` records it |
-| every news source | the news signal leaves the run; its weight is not spread as zeros |
-| Jev (key missing, 401, down) | after five failures with no success the scoring stops; news is not in the scores; answers cached from the early pass are still used |
+| every news source | the news signal leaves the run; its weight is not spread as zeros; with the catalyst required, no list is written |
+| Jev (key missing, 401, down) | after five failures with no success the scoring stops; news is not in the scores and, with the catalyst required, no list is written; answers cached from the early pass are still used |
 | Kite session expired or no historical-data permission | `screen` stops at the first request with a message pointing to `jevtrader login`; `run` uses the static list |
 | Kite quotes (final pass) | the pass proceeds without the gap and sector-index signals |
 | quotes that still equal the previous close | treated as "no pre-open yet": fewer than 10% of the candidates moved, so the gap is not used |
 | the final pass writes nothing | the early file stays and is used |
-| nothing scores above `--min-score` | exit 1; `run` uses the static list |
+| nothing scores above `--min-score`, or no stock has a catalyst | exit 1; `run` uses the static list |
+| no news could be scored while a catalyst is required | exit 1 with a note; `run` uses the static list |
+
+## Revision: rebuilt around news catalysts
+
+**Issue:** [#52](https://github.com/sanjeev2040/jev-trader/issues/52). The captain approved this change after the picker study ("lets implement suggestions 1-3").
+
+### Evidence
+
+The picker study ran the pre-market picker as first designed (news 0.40, sector 0.25, range 0.10; no gap on past days) over 13 trading days, 2026-09-14 to 2026-10-01, trading the window 09:15–10:15 with a budget of ₹25,000 (method in [0005](0005-picker-study.md)). The figures below are as recorded in the issue; the study's own report is not kept in this repository.
+
+| Measure | Result |
+| --- | --- |
+| Buy-and-hold of the picks | −2,319 |
+| Buy-and-hold of a random list from the same screened pool | −161 (picks minus random: t −1.95) |
+| Jev trading the picks | −1,435 |
+| Jev BUY/SELL hit rate at 5, 15 and 30 minutes | 46–48% |
+| Jev BUY/SELL hit rate at the day's close | 54.9% (+0.17%) |
+| Jev calibration | flat: calls made with 90%+ confidence were right about 47% of the time |
+
+Rank correlation (IC) of each signal with the stock's return over the window:
+
+| Signal | Finding |
+| --- | --- |
+| news | daily IC **+0.16** (t 4.09); stocks with positive news returned +0.23% over the window, with negative news −0.60% |
+| sector strength | about 0 |
+| range | **−0.125**: wide-range stocks did worse |
+
+So the ranking as built picked worse than chance, the one signal that worked (news) was 40% of the score, and the signal with a negative relation (range) was given a positive weight. Jev's per-minute calls were not better than a coin at the horizons traded; that is a finding about the deciders, not the picker, and is not addressed here.
+
+### What changed
+
+1. News is the primary signal (weight 0.60) and a material positive catalyst, scored by Jev, is required to be listed (`--require-catalyst`, default on; thresholds `--catalyst-material`, `--catalyst-direction`, `--catalyst-impact`).
+2. Sector strength carries no weight by default (`--w-sector 0`). It is still computed and written to the file's `sectors` for reading, and the sector cap still applies.
+3. Range has no positive weight (`--w-range 0`); a negative value penalises a wide range.
+4. Kept as they were: the liquidity filters, the ASM/GSM and series exclusions, the exclusion of NIFTY 50 and Next 50, the per-sector cap, `--min-score`.
+5. `jevtrader study` takes the same flags and defaults, records the catalyst settings in its report, and its cached picks are keyed on them, so earlier cached days are recomputed.
+
+### Not known
+
+The revised ranking has not been run through the study. Wherever the catalyst requirement leaves a day with few names, the budget goes to fewer stocks or stays unspent, and the study's per-day numbers would show it. The thresholds, the gap weight and whether the news signal's 13-day IC holds outside that window are untested.
 
 ## Not verified, and decisions for the captain
 
@@ -170,7 +212,7 @@ The pre-market run does not change the VM's schedule or size.
 2. **Pre-open data in Kite quotes.** That `last_price` between 09:08 and 09:15 is the indicative/equilibrium price, and what `volume` means then, was not observed. The code reads the gap as `last_price / ohlc.close − 1` and refuses to use it unless it sees prices that differ from the previous close. The brief also asked for pre-open volume; it is read into `Quote.Volume` but not scored, because its meaning is unobserved. **Check on the first morning with a live session** (`screen --phase final` at 09:09 and compare with the Kite web app).
 3. **Sectoral index names** in `DefaultSectorIndexes` (`NSE:NIFTY IT`, `NSE:NIFTY FIN SERVICE`, …) follow Kite's naming from memory. A name Kite does not know is skipped without harm; the member-based sector signal does not depend on them.
 4. **systemd specifics** were not run on a VM: how `TimeoutStartSec=30min` interacts with a `Type=oneshot` unit's `ExecStartPre`, `Persistent=true` behaviour after a deallocation, and `OnCalendar=… Asia/Kolkata` (the backup timer already relies on the last).
-5. **No evidence yet that the list beats the static one.** Weights and thresholds are priors. The way to test it is `screen --date <past day>` (reconstructs the list from candles and filings that were public before that open; RSS feeds keep no history, so a past day uses NSE filings only), `backfill` those symbols, and `replay --watchlist-file --compare` against the large-cap result. Not done here.
+5. **Evidence that the first ranking did not work, and none yet that the revised one does.** The study in the revision below found the first weights lost money. The revised weights and catalyst thresholds follow its signal tests but have not themselves been run through `jevtrader study`. The way to test it is `screen --date <past day>` (reconstructs the list from candles and filings that were public before that open; RSS feeds keep no history, so a past day uses NSE filings only), `backfill` those symbols, and `replay --watchlist-file --compare` against the large-cap result. Not done here.
 6. **Mid and small caps trade with wider spreads than the paper broker assumes.** `paper.DefaultConfig` uses a flat 2 bps of slippage; for these stocks that is optimistic, so paper results on this list will look better than live would. Changing the paper broker is out of scope; flagged.
 7. **Circuit limits.** A stock at its circuit cannot be traded in the direction of the move; the screen does not read circuit bands (Kite's quote carries them) and can pick a stock that opens locked. Flagged for a follow-up.
 8. **Name matching.** RSS headlines are mapped to companies by their registered names (dropping `Ltd` and generic trailing words) and by the symbol in capitals; ambiguous or very short names are not matched. This misses some mentions and the Jev `material` question filters passing mentions. In a live run on 2026-10-03, 18 of 82 items in the 18 hour window mapped to one to three screened companies; they were read by eye and looked right apart from passing mentions.

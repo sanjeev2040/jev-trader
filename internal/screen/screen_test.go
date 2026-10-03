@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -269,6 +270,17 @@ func baseConfig(t *testing.T, phase string, now time.Time) Config {
 	return cfg
 }
 
+// legacyConfig is baseConfig with the weights this screen shipped with before
+// the picker study (news 0.40, sector 0.25, gap 0.25, range 0.10) and no
+// catalyst requirement, for the tests of the signals themselves.
+func legacyConfig(t *testing.T, phase string, now time.Time) Config {
+	t.Helper()
+	cfg := baseConfig(t, phase, now)
+	cfg.Weights = Weights{News: 0.40, Sector: 0.25, Gap: 0.25, Range: 0.10}
+	cfg.Catalyst.Require = false
+	return cfg
+}
+
 func keysOf(f watchlist.File) string { return strings.Join(f.Keys(), ",") }
 
 func source(f watchlist.File, name string) (watchlist.Source, bool) {
@@ -281,7 +293,7 @@ func source(f watchlist.File, name string) (watchlist.Source, bool) {
 }
 
 func TestEarlyScreenRanksOnNewsSectorAndRange(t *testing.T) {
-	cfg := baseConfig(t, watchlist.PhaseEarly, earlyNow)
+	cfg := legacyConfig(t, watchlist.PhaseEarly, earlyNow)
 	market := &fakeMarket{}
 	f, err := Run(context.Background(), cfg, Deps{NSE: nseFetcher(), Market: market, News: testNews(), Jev: &fakeJev{}, Model: "jev-1.13.0"})
 	if err != nil {
@@ -441,7 +453,7 @@ func TestHistoricRunNeverReadsQuotes(t *testing.T) {
 }
 
 func TestBadNewsMakesAShortCandidateOnlyInBothMode(t *testing.T) {
-	cfg := baseConfig(t, watchlist.PhaseEarly, earlyNow)
+	cfg := legacyConfig(t, watchlist.PhaseEarly, earlyNow)
 	cfg.Direction = "both"
 	cfg.TopN = 10
 	cfg.MaxPerSector = 0
@@ -464,7 +476,7 @@ func TestBadNewsMakesAShortCandidateOnlyInBothMode(t *testing.T) {
 }
 
 func TestWithoutJevTheNewsSignalIsLeftOutNotZero(t *testing.T) {
-	cfg := baseConfig(t, watchlist.PhaseEarly, earlyNow)
+	cfg := legacyConfig(t, watchlist.PhaseEarly, earlyNow)
 	f, err := Run(context.Background(), cfg, Deps{NSE: nseFetcher(), Market: &fakeMarket{}, News: testNews(), Jev: nil})
 	if err != nil {
 		t.Fatal(err)
@@ -481,7 +493,7 @@ func TestWithoutJevTheNewsSignalIsLeftOutNotZero(t *testing.T) {
 }
 
 func TestJevFailingEverywhereStillYieldsAList(t *testing.T) {
-	cfg := baseConfig(t, watchlist.PhaseEarly, earlyNow)
+	cfg := legacyConfig(t, watchlist.PhaseEarly, earlyNow)
 	j := &fakeJev{err: &domainErr{"jev: HTTP 401"}}
 	f, err := Run(context.Background(), cfg, Deps{NSE: nseFetcher(), Market: &fakeMarket{}, News: testNews(), Jev: j})
 	if err != nil {
@@ -548,7 +560,7 @@ func TestCandlesAreCachedForTheSecondPass(t *testing.T) {
 func TestFailuresThatCannotProduceAList(t *testing.T) {
 	t.Run("no index files", func(t *testing.T) {
 		nse := func(context.Context, string) (io.ReadCloser, error) { return nil, errors.New("HTTP 403") }
-		_, err := Run(context.Background(), baseConfig(t, watchlist.PhaseEarly, earlyNow), Deps{NSE: nse, Market: &fakeMarket{}})
+		_, err := Run(context.Background(), legacyConfig(t, watchlist.PhaseEarly, earlyNow), Deps{NSE: nse, Market: &fakeMarket{}})
 		if err == nil || !strings.Contains(err.Error(), "universe") {
 			t.Errorf("err = %v", err)
 		}
@@ -571,7 +583,7 @@ func TestFailuresThatCannotProduceAList(t *testing.T) {
 		}
 	})
 	t.Run("nothing scores above the minimum", func(t *testing.T) {
-		cfg := baseConfig(t, watchlist.PhaseEarly, earlyNow)
+		cfg := legacyConfig(t, watchlist.PhaseEarly, earlyNow)
 		cfg.MinScore = 0.99
 		_, err := Run(context.Background(), cfg, Deps{NSE: nseFetcher(), Market: &fakeMarket{}})
 		if err == nil || !strings.Contains(err.Error(), "no stock scored above") {
@@ -586,7 +598,7 @@ func TestFailuresThatCannotProduceAList(t *testing.T) {
 			}
 			return inner(ctx, name)
 		}
-		f, err := Run(context.Background(), baseConfig(t, watchlist.PhaseEarly, earlyNow), Deps{NSE: nse, Market: &fakeMarket{}})
+		f, err := Run(context.Background(), legacyConfig(t, watchlist.PhaseEarly, earlyNow), Deps{NSE: nse, Market: &fakeMarket{}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -605,20 +617,37 @@ func TestConfigValidate(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, mod := range map[string]func(*Config){
-		"phase":      func(c *Config) { c.Phase = "soon" },
-		"top":        func(c *Config) { c.TopN = 0 },
-		"direction":  func(c *Config) { c.Direction = "short" },
-		"weights":    func(c *Config) { c.Weights = Weights{} },
-		"negative":   func(c *Config) { c.Weights.News = -1 },
-		"price band": func(c *Config) { c.Filters.MaxPrice = c.Filters.MinPrice },
-		"scale":      func(c *Config) { c.GapScale = 0 },
-		"cache":      func(c *Config) { c.CacheDir = "" },
+		"phase":                 func(c *Config) { c.Phase = "soon" },
+		"top":                   func(c *Config) { c.TopN = 0 },
+		"direction":             func(c *Config) { c.Direction = "short" },
+		"weights":               func(c *Config) { c.Weights = Weights{} },
+		"negative":              func(c *Config) { c.Weights.News = -1 },
+		"neg sector":            func(c *Config) { c.Weights.Sector = -0.1 },
+		"catalyst without news": func(c *Config) { c.Weights.News = 0 },
+		"catalyst material":     func(c *Config) { c.Catalyst.MinMaterial = 1.5 },
+		"catalyst impact":       func(c *Config) { c.Catalyst.MinImpact = 5 },
+		"price band":            func(c *Config) { c.Filters.MaxPrice = c.Filters.MinPrice },
+		"scale":                 func(c *Config) { c.GapScale = 0 },
+		"cache":                 func(c *Config) { c.CacheDir = "" },
 	} {
 		c := good
 		mod(&c)
 		if err := c.Validate(); err == nil {
 			t.Errorf("%s: invalid config accepted", name)
 		}
+	}
+}
+
+func TestCombineScalesByAbsoluteWeightsAndSkipsZeroWeights(t *testing.T) {
+	avail := map[string]bool{SignalNews: true, SignalRange: true, SignalSector: true}
+	signals := map[string]float64{SignalNews: 0.8, SignalRange: 1, SignalSector: 1}
+	// A range penalty of half the news weight: 0.8*0.6/0.9 - 1*0.3/0.9.
+	score, contrib := combine(map[string]float64{SignalNews: 0.6, SignalRange: -0.3, SignalSector: 0}, avail, signals)
+	if want := 0.8*0.6/0.9 - 0.3/0.9; math.Abs(score-want) > 1e-9 {
+		t.Errorf("score = %v, want %v", score, want)
+	}
+	if _, has := contrib[SignalSector]; has || contrib[SignalRange] >= 0 {
+		t.Errorf("contrib = %v: a zero weight must not be reported and a negative one must lower the score", contrib)
 	}
 }
 
@@ -669,7 +698,7 @@ func TestComputeStats(t *testing.T) {
 }
 
 func TestSecondPassReusesTheEarlyNewsScores(t *testing.T) {
-	cfg := baseConfig(t, watchlist.PhaseEarly, earlyNow)
+	cfg := legacyConfig(t, watchlist.PhaseEarly, earlyNow)
 	j := &fakeJev{}
 	deps := Deps{NSE: nseFetcher(), Market: &fakeMarket{}, News: testNews(), Jev: j, Model: "jev-1.13.0"}
 	early, err := Run(context.Background(), cfg, deps)
@@ -763,5 +792,136 @@ func TestKeepPoolRecordsEveryScreenedStockAndTheNewsTokens(t *testing.T) {
 	}
 	if s, _ := source(back, "jev"); s.InputTokens != 1200 {
 		t.Errorf("tokens lost in the file: %+v", s)
+	}
+}
+
+// By default only stocks with a material positive catalyst are listed, ranked
+// on news, and neither a strong sector nor a wide range gets a stock in.
+func TestDefaultScreenListsOnlyStocksWithAPositiveCatalyst(t *testing.T) {
+	cfg := baseConfig(t, watchlist.PhaseEarly, earlyNow)
+	f, err := Run(context.Background(), cfg, Deps{NSE: nseFetcher(), Market: &fakeMarket{}, News: testNews(), Jev: &fakeJev{}, Model: "jev-1.13.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// KPIT and Birlasoft have an order win; Mphasis (routine) and CDSL (bad
+	// news) do not, though Mphasis sits in the strongest sector.
+	if got := keysOf(f); got != "NSE:KPITTECH,NSE:BSOFT" && got != "NSE:BSOFT,NSE:KPITTECH" {
+		t.Fatalf("list = %s, want the two stocks with an order win", got)
+	}
+	if f.Weights[SignalSector] != 0 || f.Weights[SignalRange] != 0 {
+		t.Errorf("weights = %v: sector and range should carry none", f.Weights)
+	}
+	for _, e := range f.Entries {
+		if e.Signals[SignalNews] <= 0 {
+			t.Errorf("%s has no positive news signal: %v", e.Key, e.Signals)
+		}
+		if !strings.HasPrefix(e.Reasons[0], "news catalyst") {
+			t.Errorf("%s reasons = %q", e.Key, e.Reasons)
+		}
+		for _, r := range e.Reasons {
+			if strings.HasPrefix(r, "sector ") || strings.HasPrefix(r, "typical daily range") {
+				t.Errorf("%s: reason for a zero-weight signal: %q", e.Key, r)
+			}
+		}
+	}
+	if !strings.Contains(strings.Join(f.Notes, "\n"), "catalyst is required: 2 of ") {
+		t.Errorf("notes = %q", f.Notes)
+	}
+}
+
+// The score ignores sector and range: two stocks with the same news rank the
+// same whatever their sector or range.
+func TestDefaultScoreIsTheNewsSignalWhenNothingElseIsRead(t *testing.T) {
+	cfg := baseConfig(t, watchlist.PhaseEarly, earlyNow)
+	cfg.KeepPool = true
+	f, err := Run(context.Background(), cfg, Deps{NSE: nseFetcher(), Market: &fakeMarket{}, News: testNews(), Jev: &fakeJev{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range f.Entries {
+		if math.Abs(e.Score-e.Signals[SignalNews]) > 0.002 {
+			t.Errorf("%s score %v != news signal %v", e.Key, e.Score, e.Signals[SignalNews])
+		}
+	}
+	// The pool still holds every screened stock, with its sector and range
+	// signals, for the study to compare against.
+	if len(f.Pool) <= len(f.Entries) {
+		t.Errorf("pool of %d is not larger than the list of %d", len(f.Pool), len(f.Entries))
+	}
+}
+
+func TestCatalystThresholdsAreConfigurable(t *testing.T) {
+	run := func(mod func(*Config)) string {
+		cfg := baseConfig(t, watchlist.PhaseEarly, earlyNow)
+		mod(&cfg)
+		f, err := Run(context.Background(), cfg, Deps{NSE: nseFetcher(), Market: &fakeMarket{}, News: testNews(), Jev: &fakeJev{}})
+		if err != nil {
+			return "error: " + err.Error()
+		}
+		return keysOf(f)
+	}
+	// The fake Jev gives the order wins impact 3.2, material 0.9, direction 0.8.
+	if got := run(func(c *Config) { c.Catalyst.MinImpact = 3.5 }); !strings.HasPrefix(got, "error: no stock has a material positive news catalyst") {
+		t.Errorf("impact bar above every item: %s", got)
+	}
+	if got := run(func(c *Config) { c.Catalyst.MinMaterial = 0.95 }); !strings.HasPrefix(got, "error: ") {
+		t.Errorf("material bar above every item: %s", got)
+	}
+	if got := run(func(c *Config) { c.Catalyst.MinDirection = 0.9 }); !strings.HasPrefix(got, "error: ") {
+		t.Errorf("direction bar above every item: %s", got)
+	}
+	// Off, the list is ranked on every screened stock and may include
+	// stocks without news.
+	got := run(func(c *Config) {
+		c.Catalyst.Require = false
+		c.Weights = Weights{News: 0.4, Range: 0.1}
+		c.MinScore = -1
+	})
+	if !strings.Contains(got, "NSE:MPHASIS") && !strings.Contains(got, "NSE:CDSL") && len(strings.Split(got, ",")) < 6 {
+		t.Errorf("without the requirement the list = %s", got)
+	}
+}
+
+// A negative range weight pushes wide-range stocks down.
+func TestNegativeRangeWeightPenalisesWideRange(t *testing.T) {
+	run := func(rangeWeight float64) map[string]float64 {
+		cfg := baseConfig(t, watchlist.PhaseEarly, earlyNow)
+		cfg.Catalyst.Require = false
+		cfg.Weights = Weights{Range: rangeWeight}
+		cfg.MinScore = -1
+		cfg.TopN, cfg.MaxPerSector = 50, 0
+		f, err := Run(context.Background(), cfg, Deps{NSE: nseFetcher(), Market: &fakeMarket{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]float64{}
+		for _, e := range f.Entries {
+			out[e.Symbol] = e.Score
+		}
+		return out
+	}
+	pos, neg := run(1), run(-1)
+	// ANGELONE has the widest range of the liquid fixtures (4%), CAMS among the narrowest.
+	if pos["ANGELONE"] <= pos["MPHASIS"] || neg["ANGELONE"] >= neg["MPHASIS"] || neg["ANGELONE"] != -pos["ANGELONE"] {
+		t.Errorf("positive weight: ANGELONE %v MPHASIS %v; negative: ANGELONE %v MPHASIS %v", pos["ANGELONE"], pos["MPHASIS"], neg["ANGELONE"], neg["MPHASIS"])
+	}
+}
+
+// With the requirement on and no news scored, nothing can be listed, and the
+// file says why; the caller falls back to the static list.
+func TestCatalystRequiredButNoNewsScoredYieldsNoList(t *testing.T) {
+	cfg := baseConfig(t, watchlist.PhaseEarly, earlyNow)
+	for name, deps := range map[string]Deps{
+		"no Jev":     {NSE: nseFetcher(), Market: &fakeMarket{}, News: testNews()},
+		"Jev down":   {NSE: nseFetcher(), Market: &fakeMarket{}, News: testNews(), Jev: &fakeJev{err: &domainErr{"jev: HTTP 401"}}},
+		"no sources": {NSE: nseFetcher(), Market: &fakeMarket{}, Jev: &fakeJev{}},
+	} {
+		f, err := Run(context.Background(), cfg, deps)
+		if err == nil || !strings.Contains(err.Error(), "news catalyst") {
+			t.Errorf("%s: err = %v", name, err)
+		}
+		if len(f.Entries) != 0 || !strings.Contains(strings.Join(f.Notes, "\n"), "no news was scored") {
+			t.Errorf("%s: entries %d, notes %q", name, len(f.Entries), f.Notes)
+		}
 	}
 }

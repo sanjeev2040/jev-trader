@@ -182,13 +182,14 @@ flowchart TD
         direction TB
         N["News, last 18 hours<br/>NSE announcements + business RSS"]
         N --> NJ["Jev scores each item<br/>impact, materiality, direction"]
-        SE["Sector strength<br/>previous session; pre-open in final pass"]
+        SE["Sector strength<br/>weight 0 by default"]
         GP["Pre-open gap<br/>final pass only"]
-        RG["Recent range"]
+        RG["Recent range<br/>weight 0 by default"]
     end
 
-    SIG --> RANK["Weighted rank<br/>news 0.4, sector 0.25, gap 0.25, range 0.1<br/>unavailable signals are left out"]
-    RANK --> TOP["Top 50, at most 8 per sector"]
+    SIG --> CAT["Keep stocks with a positive news catalyst<br/>(material, positive, large enough, by Jev)"]
+    CAT --> RANK["Weighted rank<br/>news 0.6, gap 0.25, sector 0, range 0<br/>unavailable signals are left out"]
+    RANK --> TOP["Up to 50, at most 8 per sector<br/>fewer on a quiet day"]
     TOP --> F[("state/watchlist/date.json")]
     F --> RUN["jevtrader run --watchlist-file<br/>today's file only, else static --watchlist"]
 ```

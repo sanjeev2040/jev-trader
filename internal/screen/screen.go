@@ -123,7 +123,7 @@ func Run(ctx context.Context, cfg Config, d Deps) (watchlist.File, error) {
 	file.Sectors = sectors.rows
 
 	// 5. News.
-	newsSignal, newsRefs, newsRead := scoreNews(ctx, cfg, d, cands, &file)
+	newsSignal, newsRefs, catalyst, newsRead := scoreNews(ctx, cfg, d, cands, &file)
 
 	// 6. Combine.
 	avail := map[string]bool{SignalRange: true, SignalNews: newsRead, SignalGap: gapRead, SignalSector: len(sectors.score) > 0}
@@ -142,7 +142,20 @@ func Run(ctx context.Context, cfg Config, d Deps) (watchlist.File, error) {
 			signals[SignalNews] = newsSignal[sym]
 		}
 		score, contrib := combine(cfg.Weights.asMap(), avail, signals)
-		ranked = append(ranked, rankedEntry{cand: c, score: score, contrib: contrib, signals: signals})
+		ranked = append(ranked, rankedEntry{cand: c, score: score, contrib: contrib, signals: signals, catalyst: catalyst[sym]})
+	}
+	if cfg.Catalyst.Require {
+		n := 0
+		for _, r := range ranked {
+			if r.catalyst {
+				n++
+			}
+		}
+		if newsRead {
+			note("A material positive news catalyst is required: %d of %d screened stocks have one.", n, len(ranked))
+		} else {
+			note("A material positive news catalyst is required but no news was scored, so no stock can be listed.")
+		}
 	}
 	file.Entries = pick(cfg, ranked, newsRefs, sectors)
 	if cfg.KeepPool {
@@ -155,6 +168,9 @@ func Run(ctx context.Context, cfg Config, d Deps) (watchlist.File, error) {
 		}
 	}
 	if len(file.Entries) == 0 {
+		if cfg.Catalyst.Require {
+			return file, fmt.Errorf("no stock has a material positive news catalyst scoring above %.2f", cfg.MinScore)
+		}
 		return file, fmt.Errorf("no stock scored above %.2f", cfg.MinScore)
 	}
 	for _, name := range []string{SignalNews, SignalGap, SignalSector} {

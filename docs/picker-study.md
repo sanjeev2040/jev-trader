@@ -71,7 +71,7 @@ Kite is called at three requests a second, as `screen` and `backfill` do, and at
 | `--start`, `--end` | `09:15`, `10:15` | the window each day is traded and held over |
 | `--deciders` | `jev,hold,momentum` | deciders over the picks |
 | `--random-deciders`, `--random-size`, `--no-random`, `--seed` | `momentum`, the picks' size, off, `1` | the random list; `jev` in `--random-deciders` doubles the token cost |
-| `--top`, `--w-news`, `--w-sector`, `--w-gap`, `--w-range`, `--max-per-sector`, `--min-score`, `--news-sources` | as `screen` | the picker's settings; the liquidity filters are `screen`'s defaults |
+| `--top`, `--w-news`, `--w-sector`, `--w-gap`, `--w-range`, `--require-catalyst`, `--catalyst-material`, `--catalyst-direction`, `--catalyst-impact`, `--max-per-sector`, `--min-score`, `--news-sources` | as `screen` (news-led weights and a required catalyst; a day without a catalyst has no picks) | the picker's settings; the liquidity filters are `screen`'s defaults |
 | `--capital` | Key Vault `trading-capital`, then the environment, then ₹25,000 | the budget the deciders trade with (see [Capital budget](run-and-replay.md#capital-budget)) |
 | `--latency`, `--decide-timeout`, `--horizon`, `--lookahead` | `1s`, `20s`, `5`, `5m,15m,30m` | as `replay`; a fixed latency keeps a result from depending on how fast Jev answered |
 | `--refresh`, `--report-only` | | recompute stored day results; or call nothing and only rebuild the report |
