@@ -5,6 +5,8 @@ Realtime trading system using Zerodha Kite data and the Jev decision model
 
 `jevtrader screen` picks the day's instruments before the session: NIFTY Midcap 150 and Smallcap 250 stocks (not NIFTY 50 or Next 50) that are liquid enough for intraday, ranked on news scored by Jev, sector strength and the pre-open gap. `jevtrader run --watchlist-file` trades the list and falls back to the static `--watchlist`. See [docs/run-and-replay.md](docs/run-and-replay.md#jevtrader-screen) and [reports/0004-watchlist.md](reports/0004-watchlist.md).
 
+`jevtrader study` backtests the picker over several past weeks against buy-and-hold of the picks and a random list of the same size, with hit rates, calibration, which signals went with the morning's return, and Jev's token cost. See [docs/picker-study.md](docs/picker-study.md) and [reports/0005-picker-study.md](reports/0005-picker-study.md).
+
 ## CI
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on every pull request into `dev` and `main` and on pushes to `dev`. The `test` job runs `go build ./...`, `go vet ./...` and `go test -race ./...`; the `docker` job builds the image (not pushed) and the `bicep` job compiles `infra/main.bicep`. Tests use fixtures only and need no secrets. Superseded runs on the same PR or branch are cancelled. To run the same checks locally:

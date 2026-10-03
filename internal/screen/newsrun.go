@@ -20,6 +20,9 @@ const maxRefsPerEntry = 3
 // only to report the cost of a run.
 const jevPricePerToken = 42e-9
 
+// JevPricePerToken is jevPricePerToken for other packages that report a cost.
+const JevPricePerToken = jevPricePerToken
+
 // scoreNews fetches the news, maps it to the candidates, has Jev score it and
 // returns each symbol's news signal in [-1, 1] and the items behind it. read is
 // false when there was no news to score (or none could be), in which case the
@@ -129,6 +132,8 @@ func scoreNews(ctx context.Context, cfg Config, d Deps, cands []candidate, file 
 	detail := fmt.Sprintf("model %s: %d (item, company) pairs scored (%d asked now, %d from today's earlier pass), %d failed; %d input tokens, %d output tokens, about $%.4f at list price",
 		d.Model, len(results), len(fresh), len(results)-len(fresh), failed, inTok, outTok, float64(inTok)*jevPricePerToken)
 	addSource("jev", "jev", watchlist.StatusOK, len(results), detail)
+	last := &file.Sources[len(file.Sources)-1]
+	last.InputTokens, last.OutputTokens = inTok, outTok
 	if failed > 0 {
 		file.Notes = append(file.Notes, fmt.Sprintf("Jev failed on %d of %d news pairs; those are not in the scores.", failed, len(todo)))
 	}

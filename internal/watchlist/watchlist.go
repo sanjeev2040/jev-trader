@@ -52,6 +52,18 @@ type File struct {
 	Entries   []Entry  `json:"entries"`
 	Sources   []Source `json:"sources"`
 	Notes     []string `json:"notes,omitempty"`
+	// Pool is every stock that passed the liquidity filters, with its score
+	// and signals, when the screen was asked to keep it (the picker study
+	// draws its comparison list from it). Entries is a subset of it.
+	Pool []PoolEntry `json:"pool,omitempty"`
+}
+
+// PoolEntry is one screened stock, picked or not.
+type PoolEntry struct {
+	Key     string             `json:"key"` // EXCHANGE:SYMBOL
+	Sector  string             `json:"sector"`
+	Score   float64            `json:"score"`
+	Signals map[string]float64 `json:"signals"`
 }
 
 // Sector is a group of the universe and its strength.
@@ -105,6 +117,10 @@ type Source struct {
 	Status string `json:"status"` // ok, failed or skipped
 	Items  int    `json:"items"`
 	Detail string `json:"detail,omitempty"`
+	// InputTokens and OutputTokens are what the source's Jev calls cost in
+	// this run; calls answered from the day's cache are not counted.
+	InputTokens  int `json:"input_tokens,omitempty"`
+	OutputTokens int `json:"output_tokens,omitempty"`
 }
 
 // Status values of a Source.

@@ -95,6 +95,9 @@ type Config struct {
 	SectorIndexes map[string]string
 	// CacheDir holds the day's universe and candle caches.
 	CacheDir string
+	// KeepPool records every screened stock, picked or not, in the file's
+	// Pool, for the picker study to draw its comparison list from.
+	KeepPool bool
 }
 
 // DefaultTopN is how many instruments the list holds. The bot trades up to this
