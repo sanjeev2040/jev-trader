@@ -448,8 +448,8 @@ type studyBackfiller struct {
 }
 
 // manifest says which instruments of a day were fetched and how many 1m
-// candles each had, so a rerun fetches only what is new and a halted stock is
-// not asked for again.
+// candles each had, so a rerun fetches only what is new. An empty answer is not
+// recorded, so a rerun asks again in case the cause was temporary.
 type manifest map[string]int
 
 func (b *studyBackfiller) manifestPath(day string) string {
@@ -525,7 +525,9 @@ func (b *studyBackfiller) fetch(ctx context.Context, day string, keys []string) 
 			counts[bar.Instrument.Token]++
 		}
 		for _, in := range batch {
-			m[in.Exchange+":"+in.Symbol] = counts[in.Token]
+			if n := counts[in.Token]; n > 0 {
+				m[in.Exchange+":"+in.Symbol] = n
+			}
 		}
 		if err := b.writeManifest(day, m); err != nil {
 			return nil, err

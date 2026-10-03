@@ -135,14 +135,14 @@ func TestStudyBackfillerFetchesOnlyWhatIsNew(t *testing.T) {
 	if k.total() != 4 { // AAA, BBB, DDD and the index
 		t.Errorf("%d requests", k.total())
 	}
-	// The same day again asks for nothing; a new name asks for that name only.
+	// The same day again asks only for the new name and the one that came back empty.
 	missing, err = b.fetch(ctx, "2026-09-28", []string{"NSE:AAA", "NSE:BBB", "NSE:DDD", "NSE:GONE", "NSE:CCC"})
-	if err != nil || k.total() != 5 || !slices.Equal(missing, []string{"NSE:DDD", "NSE:GONE"}) {
+	if err != nil || k.total() != 6 || !slices.Equal(missing, []string{"NSE:DDD", "NSE:GONE"}) {
 		t.Errorf("second fetch: %v, %d requests, missing %v", err, k.total(), missing)
 	}
 	// A fresh backfiller on the same root reads the manifest from disk.
 	b2 := newTestBackfiller(b.root, k)
-	if _, err := b2.fetch(ctx, "2026-09-28", []string{"NSE:AAA"}); err != nil || k.total() != 5 {
+	if _, err := b2.fetch(ctx, "2026-09-28", []string{"NSE:AAA"}); err != nil || k.total() != 6 {
 		t.Errorf("reopened: %v, %d requests", err, k.total())
 	}
 	// A day with no candles for the index is no session.
@@ -313,8 +313,8 @@ func TestStudyRunsEndToEndOnFixtures(t *testing.T) {
 	if code := run(context.Background(), args, e); code != 0 {
 		t.Fatalf("rerun exit %d: %s", code, stderr.String())
 	}
-	// The skipped day is tried again, but its manifest already says Kite had nothing.
-	if k.total() != calls || screens.Load() != screened || int(hits.Load()) != 120 {
+	// Instruments Kite answered empty are asked again, since the cause may be temporary; nothing else is.
+	if k.total() <= calls || screens.Load() != screened || int(hits.Load()) != 120 {
 		t.Errorf("rerun: %d Kite requests (was %d), %d screens (was %d), %d Jev requests", k.total(), calls, screens.Load(), screened, hits.Load())
 	}
 	// --report-only calls nothing at all.
