@@ -233,6 +233,7 @@ type fixture struct {
 	mu                          sync.Mutex
 	screens, backfills, replays int
 	noData                      map[string]bool
+	quiet                       map[string]bool // days the screen lists nothing
 	missing                     []string
 	replayed                    []ReplayRequest
 }
@@ -245,6 +246,11 @@ func (f *fixture) deps() Deps {
 			f.mu.Unlock()
 			file := watchlist.File{Version: 1, Date: day, Phase: watchlist.PhaseHistoric, Final: true,
 				Sources: []watchlist.Source{{Name: "jev", Kind: "jev", Status: watchlist.StatusOK, InputTokens: 1000, OutputTokens: 10}}}
+			if f.quiet[day] {
+				file.Entries = []watchlist.Entry{}
+				file.Pool = []watchlist.PoolEntry{{Key: "NSE:D"}, {Key: "NSE:E"}}
+				return file, nil
+			}
 			for i, k := range []string{"NSE:A", "NSE:B", "NSE:C"} {
 				sig := map[string]float64{screen.SignalSector: 0.5, screen.SignalRange: float64(i) / 2}
 				if i == 0 {
@@ -566,5 +572,31 @@ func TestSummarizeAndReport(t *testing.T) {
 	md.Reset()
 	if err := WriteMarkdown(&md, Summarize("a", "b", nil), Meta{}); err != nil || !strings.Contains(md.String(), "No day could be studied") {
 		t.Errorf("empty report: %v\n%s", err, md.String())
+	}
+}
+
+// A day on which the screen lists nothing is a valid day with no picks: it is
+// stored, nothing is backfilled or replayed for it, and it adds nothing to the
+// totals.
+func TestRunTreatsAnEmptyListAsADayWithNoPicks(t *testing.T) {
+	cfg := baseConfig(t)
+	f := &fixture{quiet: map[string]bool{"2026-10-06": true}}
+	days, err := Run(context.Background(), cfg, f.deps())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := days[1]; d.Status != StatusOK || d.Picks.Names != 0 || d.Random != nil {
+		t.Errorf("quiet day = %+v", d)
+	}
+	if f.backfills != 2 || f.replays != 4 {
+		t.Errorf("backfills %d, replays %d: the quiet day should cost none", f.backfills, f.replays)
+	}
+	s := Summarize(cfg.From, cfg.To, days)
+	if s.OKDays != 3 || s.Picks.Days != 2 || s.Picks.Names != 6 {
+		t.Errorf("summary: ok days %d, picks %+v", s.OKDays, s.Picks)
+	}
+	n := f.screens
+	if _, err := Run(context.Background(), cfg, f.deps()); err != nil || f.screens != n {
+		t.Errorf("rerun re-screened: %v, screens %d (was %d)", err, f.screens, n)
 	}
 }

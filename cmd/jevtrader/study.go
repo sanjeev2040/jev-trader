@@ -107,11 +107,15 @@ func studyCmd(ctx context.Context, args []string, e env) error {
 	reportOnly := fs.Bool("report-only", false, "call nothing: build the report from the day results stored by an earlier run with the same settings")
 	logPath := fs.String("log", "", "decision log (SQLite) the replays are written to (default <data-dir>/study/decisions.db)")
 	top := fs.Int("top", def.TopN, "number of instruments the picker puts on the list")
-	wNews := fs.Float64("w-news", def.Weights.News, "weight of the news signal")
-	wSector := fs.Float64("w-sector", def.Weights.Sector, "weight of the sector-strength signal")
+	wNews := fs.Float64("w-news", def.Weights.News, "weight of the news signal (the primary signal)")
+	wSector := fs.Float64("w-sector", def.Weights.Sector, "weight of the sector-strength signal (0: the study found no relation to returns)")
 	wGap := fs.Float64("w-gap", def.Weights.Gap, "weight of the pre-open gap signal (a past day has none; it is left out of every score)")
-	wRange := fs.Float64("w-range", def.Weights.Range, "weight of the recent-range signal")
+	wRange := fs.Float64("w-range", def.Weights.Range, "weight of the recent-range signal; 0 leaves it out, negative penalises a wide range (the study found wide-range stocks did worse)")
 	maxPerSector := fs.Int("max-per-sector", def.MaxPerSector, "most picks from one sector; 0 for no cap")
+	requireCatalyst := fs.Bool("require-catalyst", def.Catalyst.Require, "list only stocks with a news item Jev scored as material, positive and large enough (the list may then be short, or empty on a quiet day, and run then does not trade); --require-catalyst=false ranks every screened stock")
+	catMaterial := fs.Float64("catalyst-material", def.Catalyst.MinMaterial, "least Jev 'material' score (0..1) of a catalyst item")
+	catDirection := fs.Float64("catalyst-direction", def.Catalyst.MinDirection, "least Jev direction (P(up) - P(down), 0..1) of a catalyst item")
+	catImpact := fs.Float64("catalyst-impact", def.Catalyst.MinImpact, "least Jev impact level (0 none, 1 under 1%, 2 about 1-2%, 3 about 2-4%, 4 over 4%) of a catalyst item")
 	minScore := fs.Float64("min-score", def.MinScore, "least score a pick needs")
 	sources := fs.String("news-sources", "all", `news sources, as for screen; RSS feeds keep no history, so a past day reads NSE filings only`)
 	model := fs.String("model", jev.DefaultModel, "pinned Jev model id (\"jev-latest\" is rejected)")
@@ -185,6 +189,7 @@ flags:`)
 	cfg.Phase = watchlist.PhaseHistoric
 	cfg.TopN, cfg.MaxPerSector, cfg.MinScore = *top, *maxPerSector, *minScore
 	cfg.Weights = screen.Weights{News: *wNews, Sector: *wSector, Gap: *wGap, Range: *wRange}
+	cfg.Catalyst = screen.Catalyst{Require: *requireCatalyst, MinMaterial: *catMaterial, MinDirection: *catDirection, MinImpact: *catImpact}
 	cfg.CacheDir, cfg.KeepPool = *dataDir, true
 	cfg.Date = first
 	if err := cfg.Validate(); err != nil {
@@ -210,7 +215,7 @@ flags:`)
 		randomN = -1
 		rnames = nil
 	}
-	screenKey := fingerprint("screen/v1", cfg.TopN, cfg.MaxPerSector, cfg.MinScore, cfg.Weights, cfg.Filters, cfg.NewsWindow, cfg.MaxNewsItems, srcNames, *model)
+	screenKey := fingerprint("screen/v2", cfg.TopN, cfg.MaxPerSector, cfg.MinScore, cfg.Weights, cfg.Catalyst, cfg.Filters, cfg.NewsWindow, cfg.MaxNewsItems, srcNames, *model)
 	runKey := fingerprint("run/v1", screenKey, *start, *end, names, rnames, randomN, *seed, capital.Amount, *latency, *horizon, horizons, *model)
 
 	sc := study.Config{
@@ -318,11 +323,15 @@ func studySettings(sc study.Config, cfg screen.Config, sources []string, start, 
 	case sc.RandomN == 0:
 		random = fmt.Sprintf("as many stocks as the day's picks, drawn from the screened pool, seed %d, replayed with %s", sc.Seed, strings.Join(sc.RandomDeciders, ", "))
 	}
-	w := cfg.Weights
+	w, k := cfg.Weights, cfg.Catalyst
+	catalyst := "not required"
+	if k.Require {
+		catalyst = fmt.Sprintf("required (material ≥ %.2f, direction ≥ %.2f, impact ≥ %.1f)", k.MinMaterial, k.MinDirection, k.MinImpact)
+	}
 	return [][2]string{
 		{"Days", sc.From + " to " + sc.To},
 		{"Window", fmt.Sprintf("%s–%s IST", start, end)},
-		{"Picker", fmt.Sprintf("top %d, at most %d a sector, minimum score %.2f, weights news %.2f sector %.2f gap %.2f range %.2f (the gap is absent on past days), news from %s", cfg.TopN, cfg.MaxPerSector, cfg.MinScore, w.News, w.Sector, w.Gap, w.Range, strings.Join(sources, ", "))},
+		{"Picker", fmt.Sprintf("top %d, at most %d a sector, minimum score %.2f, weights news %.2f sector %.2f gap %.2f range %.2f (the gap is absent on past days), news catalyst %s, news from %s", cfg.TopN, cfg.MaxPerSector, cfg.MinScore, w.News, w.Sector, w.Gap, w.Range, catalyst, strings.Join(sources, ", "))},
 		{"Deciders on the picks", strings.Join(sc.PickDeciders, ", ")},
 		{"Random list", random},
 		{"Jev model", model},

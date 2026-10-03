@@ -203,6 +203,14 @@ func runDay(ctx context.Context, cfg Config, deps Deps, day string) (DayResult, 
 		return skipped(day, "screen: "+err.Error()), nil
 	}
 	picks := wl.Keys()
+	if len(picks) == 0 {
+		res := DayResult{Version: ResultVersion, Date: day, Status: StatusOK, Phase: wl.Phase, Notes: wl.Notes}
+		for _, s := range wl.Sources {
+			res.ScreenInputTokens += s.InputTokens
+			res.ScreenOutputTokens += s.OutputTokens
+		}
+		return res, nil
+	}
 	var random []watchlist.PoolEntry
 	if cfg.RandomN >= 0 {
 		n := cfg.RandomN

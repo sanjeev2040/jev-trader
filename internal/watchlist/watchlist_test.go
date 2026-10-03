@@ -71,7 +71,6 @@ func TestReadRejectsBadFiles(t *testing.T) {
 	bad := map[string]string{
 		"not json":      `{`,
 		"unknown field": `{"version":1,"date":"2026-10-05","entries":[{"key":"NSE:A"}],"surprise":1}`,
-		"no entries":    `{"version":1,"date":"2026-10-05","entries":[]}`,
 		"bad key":       `{"version":1,"date":"2026-10-05","entries":[{"key":"INFY"}]}`,
 		"duplicate":     `{"version":1,"date":"2026-10-05","entries":[{"key":"NSE:A"},{"key":"NSE:A"}]}`,
 		"bad date":      `{"version":1,"date":"05-10-2026","entries":[{"key":"NSE:A"}]}`,
@@ -90,12 +89,25 @@ func TestReadRejectsBadFiles(t *testing.T) {
 	}
 }
 
+func TestEmptyWatchlistIsValid(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "x.json")
+	f := sample()
+	f.Entries = []Entry{}
+	if err := Write(path, f); err != nil {
+		t.Fatalf("Write refused an empty watchlist: %v", err)
+	}
+	got, err := Read(path)
+	if err != nil || len(got.Keys()) != 0 {
+		t.Errorf("read back: %v, %v", got.Keys(), err)
+	}
+}
+
 func TestWriteRefusesInvalid(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.json")
 	f := sample()
-	f.Entries = nil
+	f.Entries = []Entry{{Key: "INFY"}}
 	if err := Write(path, f); err == nil {
-		t.Fatal("Write accepted an empty watchlist")
+		t.Fatal("Write accepted an invalid watchlist")
 	}
 	if _, err := os.Stat(path); err == nil {
 		t.Error("an invalid watchlist was written")

@@ -72,7 +72,7 @@ func TestScreenWritesTheDatedWatchlist(t *testing.T) {
 	out, data := t.TempDir(), t.TempDir()
 	e, stdout, stderr := testEnv(nil)
 	// A past day is always the historic phase, whatever the clock says.
-	args := []string{"screen", "--date", "2020-01-02", "--out-dir", out, "--data-dir", data, "--news-sources", "none", "--top", "2", "--min-score", "0"}
+	args := []string{"screen", "--date", "2020-01-02", "--out-dir", out, "--data-dir", data, "--news-sources", "none", "--require-catalyst=false", "--w-sector", "0.25", "--w-range", "0.1", "--top", "2", "--min-score", "0"}
 	if code := run(context.Background(), args, e); code != 0 {
 		t.Fatalf("code %d, stderr %q", code, stderr.String())
 	}
@@ -99,6 +99,22 @@ func TestScreenWritesTheDatedWatchlist(t *testing.T) {
 	}
 }
 
+// With the defaults a catalyst is required, so a screen that read no news
+// writes no list and fails, leaving `run` on its static list.
+func TestScreenRequiresACatalystByDefault(t *testing.T) {
+	useScreenFixtures(t, screenMarket{})
+	out := t.TempDir()
+	e, _, stderr := testEnv(nil)
+	args := []string{"screen", "--date", "2020-01-02", "--out-dir", out, "--data-dir", t.TempDir(), "--news-sources", "none"}
+	if code := run(context.Background(), args, e); code != 1 || !strings.Contains(stderr.String(), "news catalyst") {
+		t.Fatalf("code %d, stderr %q", code, stderr.String())
+	}
+	e, _, stderr = testEnv(nil)
+	if code := run(context.Background(), append(args, "--w-news", "0"), e); code != 2 || !strings.Contains(stderr.String(), "news weight is zero") {
+		t.Fatalf("code %d, stderr %q", code, stderr.String())
+	}
+}
+
 func TestEarlyScreenKeepsAFinalWatchlistUnlessForced(t *testing.T) {
 	useScreenFixtures(t, screenMarket{})
 	out := t.TempDir()
@@ -108,7 +124,7 @@ func TestEarlyScreenKeepsAFinalWatchlistUnlessForced(t *testing.T) {
 	if err := watchlist.Write(path, final); err != nil {
 		t.Fatal(err)
 	}
-	args := []string{"screen", "--phase", "early", "--out-dir", out, "--data-dir", t.TempDir(), "--news-sources", "none", "--min-score", "0"}
+	args := []string{"screen", "--phase", "early", "--out-dir", out, "--data-dir", t.TempDir(), "--news-sources", "none", "--require-catalyst=false", "--w-sector", "0.25", "--w-range", "0.1", "--min-score", "0"}
 
 	e, stdout, stderr := testEnv(nil)
 	if code := run(context.Background(), args, e); code != 0 {
@@ -166,6 +182,7 @@ func TestScreenValidatesInput(t *testing.T) {
 		"jev-latest":         {"--model", "jev-latest"},
 		"stray argument":     {"extra"},
 		"bad price band":     {"--min-price", "100", "--max-price", "50"},
+		"both and catalyst":  {"--direction", "both"},
 	} {
 		e, _, stderr := testEnv(nil)
 		full := append([]string{"screen", "--out-dir", t.TempDir(), "--data-dir", t.TempDir()}, args...)
@@ -284,6 +301,16 @@ func TestResolveWatchlist(t *testing.T) {
 			t.Errorf("= %v, %v", got, err)
 		}
 	})
+	t.Run("empty file for today does not fall back", func(t *testing.T) {
+		empty := filepath.Join(dir, "empty.json")
+		if err := watchlist.Write(empty, watchlist.File{Date: "2026-10-05", Phase: watchlist.PhaseFinal, Final: true, Entries: []watchlist.Entry{}}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := resolveWatchlist(static, empty, onDay, logger)
+		if err != nil || len(got) != 0 {
+			t.Errorf("= %v, %v", got, err)
+		}
+	})
 	t.Run("no fallback", func(t *testing.T) {
 		if _, err := resolveWatchlist(nil, filepath.Join(dir, "nope.json"), onDay, logger); err == nil {
 			t.Error("a missing file with no static list was accepted")
@@ -368,4 +395,39 @@ func TestReplayWithAWatchlistFile(t *testing.T) {
 			t.Errorf("code %d, stderr %q", code, stderr.String())
 		}
 	})
+}
+
+// On a quiet day the picker's list is empty and run idles for the session: it
+// neither trades the static --watchlist nor asks for Kite keys, and says why.
+func TestRunIdlesOnAnEmptyWatchlistFile(t *testing.T) {
+	path := watchlist.Path(t.TempDir(), todayIST())
+	if err := watchlist.Write(path, watchlist.File{Date: todayIST(), Final: true, Entries: []watchlist.Entry{}}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int)
+	e, _, stderr := testEnv(nil)
+	go func() {
+		done <- run(ctx, []string{"run", "--watchlist-file", path, "--watchlist", "NSE:INFY"}, e)
+	}()
+	select {
+	case code := <-done:
+		t.Fatalf("run returned %d before the session ended: %q", code, stderr.String())
+	case <-time.After(200 * time.Millisecond):
+	}
+	cancel()
+	if code := <-done; code != 0 {
+		t.Fatalf("code %d, stderr %q", code, stderr.String())
+	}
+	if out := stderr.String(); !strings.Contains(out, "no news catalysts today") || strings.Contains(out, "KITE") {
+		t.Errorf("stderr = %q", out)
+	}
+}
+
+func TestPrintWatchlistSaysWhenThereAreNoCatalysts(t *testing.T) {
+	var b strings.Builder
+	printWatchlist(&b, "x.json", watchlist.File{Date: "2026-10-05", Phase: watchlist.PhaseFinal, Entries: []watchlist.Entry{}})
+	if !strings.Contains(b.String(), "No catalysts today") {
+		t.Errorf("summary = %q", b.String())
+	}
 }

@@ -95,6 +95,12 @@ func trade(ctx context.Context, args []string, e env) error {
 		return err
 	}
 
+	if len(symbols) == 0 {
+		logger.Info("the watchlist file lists no instruments (no news catalysts today); not trading, and not falling back to --watchlist", "path", *watchlistFile)
+		<-ctx.Done()
+		return nil
+	}
+
 	secrets, err := loadSecrets(ctx, e, config.EnvKiteAPIKey, config.EnvKiteAPISecret, config.EnvJevAPIKey)
 	if err != nil {
 		return usageError{err}

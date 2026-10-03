@@ -182,20 +182,21 @@ flowchart TD
         direction TB
         N["News, last 18 hours<br/>NSE announcements + business RSS"]
         N --> NJ["Jev scores each item<br/>impact, materiality, direction"]
-        SE["Sector strength<br/>previous session; pre-open in final pass"]
+        SE["Sector strength<br/>weight 0 by default"]
         GP["Pre-open gap<br/>final pass only"]
-        RG["Recent range"]
+        RG["Recent range<br/>weight 0 by default"]
     end
 
-    SIG --> RANK["Weighted rank<br/>news 0.4, sector 0.25, gap 0.25, range 0.1<br/>unavailable signals are left out"]
-    RANK --> TOP["Top 50, at most 8 per sector"]
+    SIG --> CAT["Keep stocks with a positive news catalyst<br/>(material, positive, large enough, by Jev)"]
+    CAT --> RANK["Weighted rank<br/>news 0.6, gap 0.25, sector 0, range 0<br/>unavailable signals are left out"]
+    RANK --> TOP["Up to 50, at most 8 per sector<br/>fewer on a quiet day"]
     TOP --> F[("state/watchlist/date.json")]
     F --> RUN["jevtrader run --watchlist-file<br/>today's file only, else static --watchlist"]
 ```
 
 - **Two passes.** `early` runs at 08:30 on news and the previous session; `final` runs at 09:08:30 and adds the pre-open gap and sectoral indices (`final=true` in the file). An early pass never replaces a final file unless `--force`. Daily candles and Jev's news scores are cached for the day, so the second pass is short.
 - **A past `--date`** uses the `historic` phase: no pre-open exists and only NSE filings supply news.
-- **The fallback is deliberate.** Whatever the screen does, `run` starts. If the file is missing, stale or unreadable, it trades the static `watchlist` from the deployment parameters, and it refuses to start only when it has neither.
+- **The fallback is deliberate.** Whatever the screen does, `run` starts (on a quiet day with an empty list it idles rather than trading the static list). If the file is missing, stale or unreadable, it trades the static `watchlist` from the deployment parameters, and it refuses to start only when it has neither.
 - **Needs** a Kite session and `KITE_API_KEY`; without `JEV_API_KEY` the news is fetched but not scored.
 
 ## Secrets and configuration

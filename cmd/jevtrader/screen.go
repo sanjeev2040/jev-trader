@@ -80,16 +80,20 @@ func screenCmd(ctx context.Context, args []string, e env) error {
 	dataDir := fs.String("data-dir", "data", "directory for the cached instrument master, constituent lists and daily candles")
 	stateDir := fs.String("state-dir", "", "directory of the saved Kite session (default $XDG_STATE_HOME/jevtrader or ~/.local/state/jevtrader)")
 	top := fs.Int("top", def.TopN, "number of instruments to put on the list")
-	direction := fs.String("direction", def.Direction, `"long" ranks by expected rise; "both" ranks by the size of the score and also lists short candidates`)
-	wNews := fs.Float64("w-news", def.Weights.News, "weight of the news signal")
-	wSector := fs.Float64("w-sector", def.Weights.Sector, "weight of the sector-strength signal")
+	direction := fs.String("direction", def.Direction, `"long" ranks by expected rise; "both" ranks by the size of the score and also lists short candidates (needs --require-catalyst=false: only positive news is a catalyst)`)
+	wNews := fs.Float64("w-news", def.Weights.News, "weight of the news signal (the primary signal)")
+	wSector := fs.Float64("w-sector", def.Weights.Sector, "weight of the sector-strength signal (0: the study found no relation to returns)")
 	wGap := fs.Float64("w-gap", def.Weights.Gap, "weight of the pre-open gap signal")
-	wRange := fs.Float64("w-range", def.Weights.Range, "weight of the recent-range signal")
+	wRange := fs.Float64("w-range", def.Weights.Range, "weight of the recent-range signal; 0 leaves it out, negative penalises a wide range (the study found wide-range stocks did worse)")
 	minValueCr := fs.Float64("min-value-cr", def.Filters.MinPrevValue/1e7, "least previous-day traded value, in crore rupees")
 	minADV := fs.Float64("min-adv", def.Filters.MinADV, "least average daily volume, in shares")
 	minPrice := fs.Float64("min-price", def.Filters.MinPrice, "least previous close, in rupees")
 	maxPrice := fs.Float64("max-price", def.Filters.MaxPrice, "greatest previous close, in rupees")
 	maxPerSector := fs.Int("max-per-sector", def.MaxPerSector, "most entries from one sector; 0 for no cap")
+	requireCatalyst := fs.Bool("require-catalyst", def.Catalyst.Require, "list only stocks with a news item Jev scored as material, positive and large enough (the list may then be short, or empty on a quiet day, and run then does not trade); --require-catalyst=false ranks every screened stock")
+	catMaterial := fs.Float64("catalyst-material", def.Catalyst.MinMaterial, "least Jev 'material' score (0..1) of a catalyst item")
+	catDirection := fs.Float64("catalyst-direction", def.Catalyst.MinDirection, "least Jev direction (P(up) - P(down), 0..1) of a catalyst item")
+	catImpact := fs.Float64("catalyst-impact", def.Catalyst.MinImpact, "least Jev impact level (0 none, 1 under 1%, 2 about 1-2%, 3 about 2-4%, 4 over 4%) of a catalyst item")
 	minScore := fs.Float64("min-score", def.MinScore, "least score an entry needs")
 	newsWindow := fs.Duration("news-window", def.NewsWindow, "how far back to read news")
 	maxNews := fs.Int("max-news", def.MaxNewsItems, "most (news item, company) pairs scored by Jev per run")
@@ -98,7 +102,7 @@ func screenCmd(ctx context.Context, args []string, e env) error {
 	jevURL := fs.String("jev-url", "", "Jev base URL (default: the public API)")
 	force := fs.Bool("force", false, "let an early screen replace a final watchlist already written for the day")
 	fs.Usage = func() {
-		fmt.Fprintln(e.stderr, "usage: jevtrader screen [flags]\n\nBuilds the day's watchlist before the session: NIFTY Midcap 150 and Smallcap 250\nstocks (less NIFTY 50 and Next 50) that are liquid enough for intraday, ranked on news\nscored by Jev, sector strength, the pre-open gap and recent range. Writes\n<out-dir>/YYYY-MM-DD.json, which `jevtrader run --watchlist-file` reads.\nNeeds a Kite session (`jevtrader login`) for candles and quotes. Reads KITE_API_KEY and\nJEV_API_KEY from the environment, or from the Azure Key Vault named by JEVTRADER_KEYVAULT.\nWithout JEV_API_KEY the news is fetched but not scored.\n\nflags:")
+		fmt.Fprintln(e.stderr, "usage: jevtrader screen [flags]\n\nBuilds the day's watchlist before the session: NIFTY Midcap 150 and Smallcap 250\nstocks (less NIFTY 50 and Next 50) that are liquid enough for intraday, ranked on news\nscored by Jev (a material positive catalyst is required by default), the pre-open gap and,\nif weighted, sector strength and recent range. Writes\n<out-dir>/YYYY-MM-DD.json, which `jevtrader run --watchlist-file` reads.\nNeeds a Kite session (`jevtrader login`) for candles and quotes. Reads KITE_API_KEY and\nJEV_API_KEY from the environment, or from the Azure Key Vault named by JEVTRADER_KEYVAULT.\nWithout JEV_API_KEY the news is fetched but not scored.\n\nflags:")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -123,6 +127,7 @@ func screenCmd(ctx context.Context, args []string, e env) error {
 	cfg.Filters.MinPrevValue, cfg.Filters.MinADV = *minValueCr*1e7, *minADV
 	cfg.Filters.MinPrice, cfg.Filters.MaxPrice = *minPrice, *maxPrice
 	cfg.MaxPerSector, cfg.MinScore = *maxPerSector, *minScore
+	cfg.Catalyst = screen.Catalyst{Require: *requireCatalyst, MinMaterial: *catMaterial, MinDirection: *catDirection, MinImpact: *catImpact}
 	cfg.NewsWindow, cfg.MaxNewsItems = *newsWindow, *maxNews
 	cfg.CacheDir = *dataDir
 	if err := cfg.Validate(); err != nil {
@@ -326,6 +331,9 @@ func screenDepsFor(ctx context.Context, e env, o screenOptions, conn kiteConn, m
 // printWatchlist writes a human summary of the file.
 func printWatchlist(w io.Writer, path string, f watchlist.File) {
 	fmt.Fprintf(w, "Watchlist for %s (%s phase, %d instruments) written to %s\n\n", f.Date, f.Phase, len(f.Entries), path)
+	if len(f.Entries) == 0 {
+		fmt.Fprintln(w, "No catalysts today: no stock has a material positive news item, so the list is empty and `run --watchlist-file` will not trade.")
+	}
 	for _, e := range f.Entries {
 		fmt.Fprintf(w, "%2d. %-16s %+.2f  %s (%s)\n", e.Rank, e.Key, e.Score, e.Name, e.Sector)
 		for _, r := range e.Reasons {
