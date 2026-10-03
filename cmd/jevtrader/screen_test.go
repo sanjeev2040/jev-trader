@@ -182,6 +182,7 @@ func TestScreenValidatesInput(t *testing.T) {
 		"jev-latest":         {"--model", "jev-latest"},
 		"stray argument":     {"extra"},
 		"bad price band":     {"--min-price", "100", "--max-price", "50"},
+		"both and catalyst":  {"--direction", "both"},
 	} {
 		e, _, stderr := testEnv(nil)
 		full := append([]string{"screen", "--out-dir", t.TempDir(), "--data-dir", t.TempDir()}, args...)
@@ -300,6 +301,16 @@ func TestResolveWatchlist(t *testing.T) {
 			t.Errorf("= %v, %v", got, err)
 		}
 	})
+	t.Run("empty file for today does not fall back", func(t *testing.T) {
+		empty := filepath.Join(dir, "empty.json")
+		if err := watchlist.Write(empty, watchlist.File{Date: "2026-10-05", Phase: watchlist.PhaseFinal, Final: true, Entries: []watchlist.Entry{}}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := resolveWatchlist(static, empty, onDay, logger)
+		if err != nil || len(got) != 0 {
+			t.Errorf("= %v, %v", got, err)
+		}
+	})
 	t.Run("no fallback", func(t *testing.T) {
 		if _, err := resolveWatchlist(nil, filepath.Join(dir, "nope.json"), onDay, logger); err == nil {
 			t.Error("a missing file with no static list was accepted")
@@ -384,4 +395,39 @@ func TestReplayWithAWatchlistFile(t *testing.T) {
 			t.Errorf("code %d, stderr %q", code, stderr.String())
 		}
 	})
+}
+
+// On a quiet day the picker's list is empty and run idles for the session: it
+// neither trades the static --watchlist nor asks for Kite keys, and says why.
+func TestRunIdlesOnAnEmptyWatchlistFile(t *testing.T) {
+	path := watchlist.Path(t.TempDir(), todayIST())
+	if err := watchlist.Write(path, watchlist.File{Date: todayIST(), Final: true, Entries: []watchlist.Entry{}}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int)
+	e, _, stderr := testEnv(nil)
+	go func() {
+		done <- run(ctx, []string{"run", "--watchlist-file", path, "--watchlist", "NSE:INFY"}, e)
+	}()
+	select {
+	case code := <-done:
+		t.Fatalf("run returned %d before the session ended: %q", code, stderr.String())
+	case <-time.After(200 * time.Millisecond):
+	}
+	cancel()
+	if code := <-done; code != 0 {
+		t.Fatalf("code %d, stderr %q", code, stderr.String())
+	}
+	if out := stderr.String(); !strings.Contains(out, "no news catalysts today") || strings.Contains(out, "KITE") {
+		t.Errorf("stderr = %q", out)
+	}
+}
+
+func TestPrintWatchlistSaysWhenThereAreNoCatalysts(t *testing.T) {
+	var b strings.Builder
+	printWatchlist(&b, "x.json", watchlist.File{Date: "2026-10-05", Phase: watchlist.PhaseFinal, Entries: []watchlist.Entry{}})
+	if !strings.Contains(b.String(), "No catalysts today") {
+		t.Errorf("summary = %q", b.String())
+	}
 }

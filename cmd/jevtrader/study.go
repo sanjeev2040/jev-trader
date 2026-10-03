@@ -112,7 +112,7 @@ func studyCmd(ctx context.Context, args []string, e env) error {
 	wGap := fs.Float64("w-gap", def.Weights.Gap, "weight of the pre-open gap signal (a past day has none; it is left out of every score)")
 	wRange := fs.Float64("w-range", def.Weights.Range, "weight of the recent-range signal; 0 leaves it out, negative penalises a wide range (the study found wide-range stocks did worse)")
 	maxPerSector := fs.Int("max-per-sector", def.MaxPerSector, "most picks from one sector; 0 for no cap")
-	requireCatalyst := fs.Bool("require-catalyst", def.Catalyst.Require, "list only stocks with a news item Jev scored as material, positive and large enough (the list may then be short or empty on a quiet day); --require-catalyst=false ranks every screened stock")
+	requireCatalyst := fs.Bool("require-catalyst", def.Catalyst.Require, "list only stocks with a news item Jev scored as material, positive and large enough (the list may then be short, or empty on a quiet day, and run then does not trade); --require-catalyst=false ranks every screened stock")
 	catMaterial := fs.Float64("catalyst-material", def.Catalyst.MinMaterial, "least Jev 'material' score (0..1) of a catalyst item")
 	catDirection := fs.Float64("catalyst-direction", def.Catalyst.MinDirection, "least Jev direction (P(up) - P(down), 0..1) of a catalyst item")
 	catImpact := fs.Float64("catalyst-impact", def.Catalyst.MinImpact, "least Jev impact level (0 none, 1 under 1%, 2 about 1-2%, 3 about 2-4%, 4 over 4%) of a catalyst item")

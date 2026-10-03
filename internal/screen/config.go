@@ -202,6 +202,9 @@ func (c Config) Validate() error {
 	if k.MinMaterial < 0 || k.MinMaterial > 1 || k.MinDirection < 0 || k.MinDirection > 1 || k.MinImpact < 0 || k.MinImpact > maxImpact {
 		bad("catalyst: need 0 <= material <= 1, 0 <= direction <= 1 and 0 <= impact <= %d", maxImpact)
 	}
+	if k.Require && c.Direction == "both" {
+		bad("a catalyst is required and only positive news is a catalyst, so direction both would list no short candidates: use --direction long, or --require-catalyst=false to list short candidates")
+	}
 	if k.Require && w.News == 0 {
 		bad("a catalyst is required but the news weight is zero")
 	}

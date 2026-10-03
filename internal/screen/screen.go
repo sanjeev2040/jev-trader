@@ -46,7 +46,8 @@ const minGapShare = 0.10
 
 // Run screens the universe and returns the watchlist file for cfg.Date. It
 // fails only when it cannot produce a list at all (no universe, no Kite candles,
-// no candidates); a source that fails otherwise costs its signal and is
+// no candidates, or a required catalyst with no news scored); a quiet day on
+// which no stock has a catalyst returns an empty list, not an error. A source that fails otherwise costs its signal and is
 // recorded in the file's Sources and Notes.
 func Run(ctx context.Context, cfg Config, d Deps) (watchlist.File, error) {
 	if err := cfg.Validate(); err != nil {
@@ -168,10 +169,14 @@ func Run(ctx context.Context, cfg Config, d Deps) (watchlist.File, error) {
 		}
 	}
 	if len(file.Entries) == 0 {
-		if cfg.Catalyst.Require {
-			return file, fmt.Errorf("no stock has a material positive news catalyst scoring above %.2f", cfg.MinScore)
+		switch {
+		case !cfg.Catalyst.Require:
+			return file, fmt.Errorf("no stock scored above %.2f", cfg.MinScore)
+		case !newsRead:
+			return file, errors.New("a news catalyst is required but no news could be scored")
 		}
-		return file, fmt.Errorf("no stock scored above %.2f", cfg.MinScore)
+		file.Entries = []watchlist.Entry{}
+		note("No catalysts today: no stock has a material positive news item scoring above %.2f, so the list is empty.", cfg.MinScore)
 	}
 	for _, name := range []string{SignalNews, SignalGap, SignalSector} {
 		if !avail[name] {

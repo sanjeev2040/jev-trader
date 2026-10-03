@@ -624,6 +624,7 @@ func TestConfigValidate(t *testing.T) {
 		"negative":              func(c *Config) { c.Weights.News = -1 },
 		"neg sector":            func(c *Config) { c.Weights.Sector = -0.1 },
 		"catalyst without news": func(c *Config) { c.Weights.News = 0 },
+		"catalyst with both":    func(c *Config) { c.Direction = "both" },
 		"catalyst material":     func(c *Config) { c.Catalyst.MinMaterial = 1.5 },
 		"catalyst impact":       func(c *Config) { c.Catalyst.MinImpact = 5 },
 		"price band":            func(c *Config) { c.Filters.MaxPrice = c.Filters.MinPrice },
@@ -861,14 +862,14 @@ func TestCatalystThresholdsAreConfigurable(t *testing.T) {
 		return keysOf(f)
 	}
 	// The fake Jev gives the order wins impact 3.2, material 0.9, direction 0.8.
-	if got := run(func(c *Config) { c.Catalyst.MinImpact = 3.5 }); !strings.HasPrefix(got, "error: no stock has a material positive news catalyst") {
-		t.Errorf("impact bar above every item: %s", got)
+	if got := run(func(c *Config) { c.Catalyst.MinImpact = 3.5 }); got != "" {
+		t.Errorf("impact bar above every item: %q", got)
 	}
-	if got := run(func(c *Config) { c.Catalyst.MinMaterial = 0.95 }); !strings.HasPrefix(got, "error: ") {
-		t.Errorf("material bar above every item: %s", got)
+	if got := run(func(c *Config) { c.Catalyst.MinMaterial = 0.95 }); got != "" {
+		t.Errorf("material bar above every item: %q", got)
 	}
-	if got := run(func(c *Config) { c.Catalyst.MinDirection = 0.9 }); !strings.HasPrefix(got, "error: ") {
-		t.Errorf("direction bar above every item: %s", got)
+	if got := run(func(c *Config) { c.Catalyst.MinDirection = 0.9 }); got != "" {
+		t.Errorf("direction bar above every item: %q", got)
 	}
 	// Off, the list is ranked on every screened stock and may include
 	// stocks without news.
@@ -917,11 +918,46 @@ func TestCatalystRequiredButNoNewsScoredYieldsNoList(t *testing.T) {
 		"no sources": {NSE: nseFetcher(), Market: &fakeMarket{}, Jev: &fakeJev{}},
 	} {
 		f, err := Run(context.Background(), cfg, deps)
-		if err == nil || !strings.Contains(err.Error(), "news catalyst") {
+		if err == nil || !strings.Contains(err.Error(), "no news could be scored") {
 			t.Errorf("%s: err = %v", name, err)
 		}
 		if len(f.Entries) != 0 || !strings.Contains(strings.Join(f.Notes, "\n"), "no news was scored") {
 			t.Errorf("%s: entries %d, notes %q", name, len(f.Entries), f.Notes)
 		}
+	}
+}
+
+// A quiet day with no catalyst is a valid, empty list and not a failure.
+func TestQuietDayYieldsAnEmptyList(t *testing.T) {
+	cfg := baseConfig(t, watchlist.PhaseEarly, earlyNow)
+	cfg.Catalyst.MinImpact = 3.5
+	f, err := Run(context.Background(), cfg, Deps{NSE: nseFetcher(), Market: &fakeMarket{}, News: testNews(), Jev: &fakeJev{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Entries == nil || len(f.Entries) != 0 || !strings.Contains(strings.Join(f.Notes, "\n"), "No catalysts today") {
+		t.Errorf("entries %v, notes %q", f.Entries, f.Notes)
+	}
+	if err := f.Validate(); err != nil {
+		t.Errorf("an empty list is invalid: %v", err)
+	}
+}
+
+// A stock whose net news is negative is not a catalyst, though one of its items
+// passes the thresholds.
+func TestCatalystNeedsAPositiveNetNewsSignal(t *testing.T) {
+	cfg := baseConfig(t, watchlist.PhaseEarly, earlyNow)
+	srcs := []news.Source{fakeNews{name: "nse-announcements", items: []news.Item{
+		newsAt(18, 15, 4, "nse-announcements", "1", "KPITTECH", "KPIT Technologies has bagged an order worth Rs 400 crore"),
+		newsAt(21, 0, 4, "nse-announcements", "2", "KPITTECH", "KPIT Technologies: Chief Financial Officer resigns"),
+		newsAt(21, 30, 4, "nse-announcements", "3", "KPITTECH", "KPIT Technologies: Chief Executive Officer resigns"),
+		newsAt(19, 0, 4, "nse-announcements", "4", "BSOFT", "Birlasoft has bagged an order from a bank"),
+	}}}
+	f, err := Run(context.Background(), cfg, Deps{NSE: nseFetcher(), Market: &fakeMarket{}, News: srcs, Jev: &fakeJev{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := keysOf(f); got != "NSE:BSOFT" {
+		t.Errorf("list = %q, want only the stock whose net news is positive", got)
 	}
 }

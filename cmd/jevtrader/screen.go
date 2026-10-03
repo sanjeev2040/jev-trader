@@ -80,7 +80,7 @@ func screenCmd(ctx context.Context, args []string, e env) error {
 	dataDir := fs.String("data-dir", "data", "directory for the cached instrument master, constituent lists and daily candles")
 	stateDir := fs.String("state-dir", "", "directory of the saved Kite session (default $XDG_STATE_HOME/jevtrader or ~/.local/state/jevtrader)")
 	top := fs.Int("top", def.TopN, "number of instruments to put on the list")
-	direction := fs.String("direction", def.Direction, `"long" ranks by expected rise; "both" ranks by the size of the score and also lists short candidates`)
+	direction := fs.String("direction", def.Direction, `"long" ranks by expected rise; "both" ranks by the size of the score and also lists short candidates (needs --require-catalyst=false: only positive news is a catalyst)`)
 	wNews := fs.Float64("w-news", def.Weights.News, "weight of the news signal (the primary signal)")
 	wSector := fs.Float64("w-sector", def.Weights.Sector, "weight of the sector-strength signal (0: the study found no relation to returns)")
 	wGap := fs.Float64("w-gap", def.Weights.Gap, "weight of the pre-open gap signal")
@@ -90,7 +90,7 @@ func screenCmd(ctx context.Context, args []string, e env) error {
 	minPrice := fs.Float64("min-price", def.Filters.MinPrice, "least previous close, in rupees")
 	maxPrice := fs.Float64("max-price", def.Filters.MaxPrice, "greatest previous close, in rupees")
 	maxPerSector := fs.Int("max-per-sector", def.MaxPerSector, "most entries from one sector; 0 for no cap")
-	requireCatalyst := fs.Bool("require-catalyst", def.Catalyst.Require, "list only stocks with a news item Jev scored as material, positive and large enough (the list may then be short or empty on a quiet day); --require-catalyst=false ranks every screened stock")
+	requireCatalyst := fs.Bool("require-catalyst", def.Catalyst.Require, "list only stocks with a news item Jev scored as material, positive and large enough (the list may then be short, or empty on a quiet day, and run then does not trade); --require-catalyst=false ranks every screened stock")
 	catMaterial := fs.Float64("catalyst-material", def.Catalyst.MinMaterial, "least Jev 'material' score (0..1) of a catalyst item")
 	catDirection := fs.Float64("catalyst-direction", def.Catalyst.MinDirection, "least Jev direction (P(up) - P(down), 0..1) of a catalyst item")
 	catImpact := fs.Float64("catalyst-impact", def.Catalyst.MinImpact, "least Jev impact level (0 none, 1 under 1%, 2 about 1-2%, 3 about 2-4%, 4 over 4%) of a catalyst item")
@@ -331,6 +331,9 @@ func screenDepsFor(ctx context.Context, e env, o screenOptions, conn kiteConn, m
 // printWatchlist writes a human summary of the file.
 func printWatchlist(w io.Writer, path string, f watchlist.File) {
 	fmt.Fprintf(w, "Watchlist for %s (%s phase, %d instruments) written to %s\n\n", f.Date, f.Phase, len(f.Entries), path)
+	if len(f.Entries) == 0 {
+		fmt.Fprintln(w, "No catalysts today: no stock has a material positive news item, so the list is empty and `run --watchlist-file` will not trade.")
+	}
 	for _, e := range f.Entries {
 		fmt.Fprintf(w, "%2d. %-16s %+.2f  %s (%s)\n", e.Rank, e.Key, e.Score, e.Name, e.Sector)
 		for _, r := range e.Reasons {

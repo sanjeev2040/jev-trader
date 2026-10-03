@@ -81,7 +81,7 @@ A signal that is unavailable for the whole run (no pre-open yet, Jev down, no ne
 
 The first version of this table was news 0.40, sector 0.25, gap 0.25, range 0.10, all priors. These are still priors where the study did not speak (gap, and the size of the news weight against it). Every weight, filter and threshold is a flag (`jevtrader screen -h`).
 
-**Catalyst requirement.** By default a stock enters the list only if at least one news item in the window about it was scored by Jev as a catalyst: `material` ≥ 0.5 (`--catalyst-material`), `direction` (P(UP) − P(DOWN)) ≥ 0.3 (`--catalyst-direction`) and `impact` level ≥ 1, about a 1% move or more (`--catalyst-impact`). `--require-catalyst=false` ranks every screened stock as before. The list is then as long as the day's catalysts, up to `--top`, and **may be shorter than 50 on a quiet day, or empty**. An empty list is a failed screen (exit 1) and `run` trades the static `--watchlist`, as for any screen that finds nothing. The same happens when no news could be scored (Jev down, no key, no readable source): with the requirement on, no stock can qualify, and the file's notes say so. Negative news is not a catalyst, so `--direction both` lists no short candidates while the requirement is on. The thresholds are priors; the study measured the news signal's ranking power, not where this cut falls.
+**Catalyst requirement.** By default a stock enters the list only if at least one news item in the window about it was scored by Jev as a catalyst: `material` ≥ 0.5 (`--catalyst-material`), `direction` (P(UP) − P(DOWN)) ≥ 0.3 (`--catalyst-direction`) and `impact` level ≥ 1, about a 1% move or more (`--catalyst-impact`). `--require-catalyst=false` ranks every screened stock as before. The list is then as long as the day's catalysts, up to `--top`, and **may be shorter than 50 on a quiet day, or empty**. A quiet day with no catalyst is normal: `screen` writes a valid empty final watchlist, prints "No catalysts today" and exits 0, and `run --watchlist-file` with that existing, today's, empty file does not fall back to the static `--watchlist`: it idles for the session and logs why. The static fallback stays for a missing, unreadable or stale file. A stock is a catalyst only if it has a qualifying item and its net (decayed, summed) news signal is positive. Failing to score news at all (Jev down, no key, no readable source) is not a quiet day: with the requirement on, `screen` exits 1 and `run` uses the static list. Negative news is not a catalyst, so `--direction both` is rejected while the requirement is on; listing short candidates needs `--require-catalyst=false`. In `study`, an empty day is a valid day with no picks. The thresholds are priors; the study measured the news signal's ranking power, not where this cut falls.
 
 Selection: drop stocks without a catalyst (unless `--require-catalyst=false`), sort by score (long) or by |score| (`--direction both`), drop scores below `--min-score` (0.05), keep at most `--max-per-sector` (8) per sector so the list is not one trade, take the top `--top` (50, up to which the bot trades through the day within its capital budget). Each entry carries its signals, its reasons in plain text (the signal that moved it most first, then liquidity), and the news items behind it with Jev's numbers.
 
@@ -158,13 +158,14 @@ The pre-market run does not change the VM's schedule or size.
 | NSE index files | no list; `screen` exits 1; `run` uses the static list |
 | ASM/GSM report | the list is built without that exclusion and the file says so in `notes` and `sources` |
 | a news source | that source's items are missing; `sources` records it |
-| every news source | the news signal leaves the run; its weight is not spread as zeros; with the catalyst required, no list is written |
+| every news source | the news signal leaves the run; its weight is not spread as zeros; with the catalyst required, no list is written (exit 1) |
 | Jev (key missing, 401, down) | after five failures with no success the scoring stops; news is not in the scores and, with the catalyst required, no list is written; answers cached from the early pass are still used |
 | Kite session expired or no historical-data permission | `screen` stops at the first request with a message pointing to `jevtrader login`; `run` uses the static list |
 | Kite quotes (final pass) | the pass proceeds without the gap and sector-index signals |
 | quotes that still equal the previous close | treated as "no pre-open yet": fewer than 10% of the candidates moved, so the gap is not used |
 | the final pass writes nothing | the early file stays and is used |
-| nothing scores above `--min-score`, or no stock has a catalyst | exit 1; `run` uses the static list |
+| nothing scores above `--min-score` (catalyst not required) | exit 1; `run` uses the static list |
+| no stock has a catalyst (news scored) | exit 0, empty final list; `run` idles and does not trade the static list |
 | no news could be scored while a catalyst is required | exit 1 with a note; `run` uses the static list |
 
 ## Revision: rebuilt around news catalysts

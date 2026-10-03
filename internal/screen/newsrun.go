@@ -25,7 +25,7 @@ const JevPricePerToken = jevPricePerToken
 
 // scoreNews fetches the news, maps it to the candidates, has Jev score it and
 // returns each symbol's news signal in [-1, 1], the items behind it, and the
-// symbols with a catalyst (see Catalyst). read is false when there was no news to score (or none could be), in which case the
+// symbols with a catalyst (see Catalyst; their net decayed news signal must also be positive). read is false when there was no news to score (or none could be), in which case the
 // news signal is out of this run.
 func scoreNews(ctx context.Context, cfg Config, d Deps, cands []candidate, file *watchlist.File) (signal map[string]float64, refs map[string][]watchlist.NewsRef, catalyst map[string]bool, read bool) {
 	addSource := func(name, kind, status string, items int, detail string) {
@@ -157,7 +157,7 @@ func scoreNews(ctx context.Context, cfg Config, d Deps, cands []candidate, file 
 	refs = map[string][]watchlist.NewsRef{}
 	catalyst = map[string]bool{}
 	for _, s := range results {
-		if cfg.Catalyst.holds(s) {
+		if cfg.Catalyst.holds(s) && sums[s.stock.Symbol] > 0 {
 			catalyst[s.stock.Symbol] = true
 		}
 	}

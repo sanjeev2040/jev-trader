@@ -147,9 +147,6 @@ func (f File) Validate() error {
 	if _, err := time.ParseInLocation(time.DateOnly, f.Date, IST); err != nil {
 		return fmt.Errorf("watchlist date %q: %w", f.Date, err)
 	}
-	if len(f.Entries) == 0 {
-		return errors.New("watchlist has no entries")
-	}
 	seen := map[string]bool{}
 	for i, e := range f.Entries {
 		ex, sym, ok := strings.Cut(e.Key, ":")
