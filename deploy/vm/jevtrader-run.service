@@ -9,6 +9,8 @@ Type=simple
 EnvironmentFile=/run/jevtrader/secrets.env
 # Wait (without a start timeout) for the operator's daily Kite login.
 ExecStartPre=/usr/local/lib/jevtrader/wait-for-login.sh
+# Then hold back until the final watchlist is written, but never past 09:13 IST.
+ExecStartPre=/usr/local/lib/jevtrader/wait-for-watchlist.sh
 ExecStart=/usr/local/lib/jevtrader/run.sh
 ExecStop=-/usr/bin/docker stop --time 30 jevtrader
 Restart=on-failure

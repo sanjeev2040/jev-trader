@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>Fixture feed</title>
+<item><title>Birlasoft shares slump after CFO resigns</title><description><![CDATA[<p>The company said its <b>chief financial officer</b> resigned.</p>]]></description><link>https://example.test/bsoft-cfo</link><guid>bsoft-cfo-1</guid><pubDate>Sun, 04 Oct 2026 22:15:00 +0530</pubDate></item>
+<item><title>KPIT Technologies bags $50 million order from European carmaker</title><description>The IT firm said the deal runs for five years &amp;amp; adds to its order book.</description><link>https://example.test/kpit-order</link><pubDate>Mon, 05 Oct 2026 02:00:00 +0530</pubDate></item>
+<item><title>Too old: Sensex ends flat</title><description>old</description><link>https://example.test/old</link><guid>old</guid><pubDate>Sat, 03 Oct 2026 10:00:00 +0530</pubDate></item>
+<item><title>Too new: IPO opens today</title><description>new</description><link>https://example.test/new</link><guid>new</guid><pubDate>Mon, 05 Oct 2026 09:30:00 +0530</pubDate></item>
+<item><title>Undated item</title><description>no date</description><link>https://example.test/undated</link></item>
+</channel></rss>

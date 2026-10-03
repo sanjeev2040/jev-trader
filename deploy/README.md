@@ -1,6 +1,6 @@
 # Deploying jev-trader to Azure
 
-The design is in [reports/0003-deployment.md](../reports/0003-deployment.md) (option B). In short: one Ubuntu VM in Central India, started on NSE trading mornings by a GitHub Actions cron and deallocated by Azure at 16:00 IST. It costs about $18 a month. Live order placement stays disabled: the VM runs `jevtrader run --mode=paper`.
+The design is in [reports/0003-deployment.md](../reports/0003-deployment.md) (option B). In short: one Ubuntu VM in Central India, started on NSE trading mornings by a GitHub Actions cron and deallocated by Azure at 16:00 IST. It costs about $18 a month. Live order placement stays disabled: the VM runs `jevtrader run --mode=paper`, on a watchlist that `jevtrader screen` builds each morning (below).
 
 ```
 merge dev -> main
@@ -15,6 +15,9 @@ VM boot:  jevtrader-prepare   read own tag from IMDS -> pull image from ACR (man
                               -> secrets from Key Vault into a 0600 file on tmpfs
           jevtrader-run       wait for a valid Kite session -> jevtrader run --mode=paper
 you, before 09:00: ssh tunnel + `sudo jevtrader-login`
+08:30 IST  jevtrader-screen-early.timer: `screen --phase early`  (news + previous session -> state/watchlist/<date>.json)
+09:08:30   jevtrader-screen-final.timer: `screen --phase final`  (adds the pre-open gap; final=true)
+09:13 at the latest   jevtrader-run waits for the final file, then starts with it (or the static WATCHLIST)
 15:40 IST  jevtrader-backup.timer: Parquet + SQLite .backup -> Blob Storage
 16:00 IST  Azure auto-shutdown deallocates the VM (no compute billing)
 ```
@@ -29,7 +32,7 @@ GitHub holds **no secrets**, only identifiers (tenant, subscription, resource na
 | `.github/workflows/release.yml` | build, push, tag, set the VM tag |
 | `.github/workflows/market-hours.yml` | morning start on trading days |
 | `deploy/nse-holidays.yaml`, `cmd/tradingday` | the holiday calendar and the check the schedule runs |
-| `deploy/vm/` | scripts and systemd units installed on the VM |
+| `deploy/vm/` | scripts and systemd units installed on the VM, including the screen service and timers |
 | `infra/main.bicep`, `infra/main.bicepparam` | every Azure resource |
 
 Both workflows skip with a notice, and stay green, until the repository variables in step 6 exist.
@@ -68,7 +71,7 @@ Edit `infra/main.local.bicepparam` and replace every `REPLACE_ME`:
 
 - `adminSshPublicKey`: your public key, for example the output of `cat ~/.ssh/id_ed25519.pub`.
 - `operatorCidr`: your public IP as `/32`. This is the only address that can reach SSH. When your IP changes, update the NSG rule (see "Operations").
-- `watchlist` and `jevModel`: the instruments to paper-trade and the pinned Jev model id (`jevModel` defaults to `jev-1.13.0`). The VM refuses to start `run` while `jevModel` is a placeholder.
+- `watchlist` and `jevModel`: the instruments to paper-trade and the pinned Jev model id (`jevModel` defaults to `jev-1.13.0`). The VM refuses to start `run` while `jevModel` is a placeholder. With `screenEnabled` (the default) the VM screens for the day's list before the open and `watchlist` is only the fallback `run` uses when the screen produced no usable file for today; `screenArgs` passes extra flags to `jevtrader screen` (weights, filters, `--top`; see `jevtrader screen -h`).
 - `alertEmail`: where the action group and budget alerts (80% and 100% of $25, plus a 100% forecast) go.
 - Optionally `operatorObjectId` (`az ad signed-in-user show --query id -o tsv`): you then get Key Vault Secrets Officer from the template. Otherwise grant it yourself in step 7.
 
@@ -198,6 +201,8 @@ ssh -t -L 8765:127.0.0.1:8765 jevadmin@<vm-ip> sudo jevtrader-login
    ssh jevadmin@<vm-ip> 'systemctl status jevtrader-run --no-pager; journalctl -u jevtrader-run -n 30 --no-pager'
    ```
 
+The same login gates the morning screens: `jevtrader screen` reads Kite candles and quotes with that session, so the 08:30 screen waits for it. `jevtrader-run` additionally waits for the final watchlist (written at about 09:10), but never past 09:13 IST; a login later than that starts `run` at once on the early file, or on the static `watchlist` if there is none.
+
 If you log in late, trading starts when you do, inside the risk gate's entry window. If you never log in, nothing trades and the VM is deallocated at 16:00 anyway; the cost is one idle VM-day, about $0.20. If `run` stops mid-day with a token error, run `jevtrader-login` again: systemd restarts `run` every 30 seconds until it starts.
 
 Emergency stop: `ssh jevadmin@<vm-ip> sudo touch /var/lib/jevtrader/state/KILL` trips the kill switch (see [docs/run-and-replay.md](../docs/run-and-replay.md)).
@@ -209,6 +214,7 @@ At 15:40 IST the backup timer copies the new Parquet files and a consistent SQLi
 - **Rollback.** Actions > Release > Run workflow on `main`, with `rollback_sha` set to an earlier 12-character tag (`az acr repository show-tags --name <acr> --repository jevtrader`). It checks the image exists and re-points the VM tag. It takes effect at the next boot; to apply it today, `sudo systemctl restart jevtrader-prepare jevtrader-run` on the VM.
 - **Holiday calendar.** When NSE publishes the next year's circular (usually December), add its weekday holidays to [`deploy/nse-holidays.yaml`](nse-holidays.yaml), mark them `verified: true` and add the year to `years_complete`. Until a year is complete the VM still starts on its weekdays and the workflow logs a warning. 2027 holds only a few unverified dates. Check a date with `go run ./cmd/tradingday -date 2026-11-10`. A weekend special session needs a manual start: Run workflow with `force`. Muhurat trading is an evening session and falls after the 16:00 shutdown.
 - **Change the watchlist or model.** Edit `infra/main.local.bicepparam` and redeploy (start the VM first: the extension cannot run on a deallocated VM), or edit `/etc/jevtrader/jevtrader.env` on the VM and `sudo systemctl restart jevtrader-run`. A redeploy overwrites hand edits.
+- **The morning screen.** Today's list: `jq '.entries[] | {key, score, reasons}' /var/lib/jevtrader/state/watchlist/$(TZ=Asia/Kolkata date +%F).json` (the file also has `sources` and `notes` saying what each source did). Logs: `journalctl -u 'jevtrader-screen@*' --since today`. Timers: `systemctl list-timers 'jevtrader-screen-*'`. Run one by hand while the VM is up and you are logged in: `sudo systemctl start jevtrader-screen@final.service`. Tune with `SCREEN_ARGS` in `/etc/jevtrader/jevtrader.env` (or `screenArgs` in the parameters), for example `SCREEN_ARGS='--top 6 --w-news 0.5'`; turn screening off with `WATCHLIST_SCREEN=off` (`screenEnabled = false`), after which `run` trades the static `watchlist` as before. The nightly backup copies the day's file to the `watchlist/` folder of the backup container.
 - **Redeploy the infrastructure** (for example after changing `deploy/vm/`): `az vm start`, run the `az deployment group create` from step 4, and let the auto-shutdown deallocate it again. The VM's `jev-image` tag is not part of the template, so a redeploy leaves it alone.
 - **Your IP changed.** `az network nsg rule update -g rg-jevtrader-prod --nsg-name nsg-jevtrader -n ssh-from-operator --source-address-prefixes <new-ip>/32`.
 - **Resize.** After measuring resident memory over a recorded session, run `az vm deallocate` and `az vm resize --size Standard_B2ats_v2`, then set `vmSize` in your parameters so a later redeploy agrees.
@@ -225,5 +231,7 @@ At 15:40 IST the backup timer copies the new Parquet files and a consistent SQLi
 | `jevtrader-prepare` says "no valid jev-image tag" | no release has run yet; merge to `main` or run the Release workflow |
 | `jevtrader-prepare` cannot read a secret | the secret is not set, or the Key Vault role assignment has not propagated yet (it retries every 30 s) |
 | `jevtrader-run` keeps restarting | `journalctl -u jevtrader-run`: usually Kite rejecting the session; log in again |
+| `run` traded the static list although screening is on | `journalctl -u jevtrader-run` says why (`watchlist file not used`: missing, or not for today); then `journalctl -u 'jevtrader-screen@*'`: usually no Kite login before 09:08, an NSE or Kite error, or no stock scoring above the minimum |
+| The screen says Kite refused the request | an expired session or the Kite historical-data permission; log in again, and check the Kite Connect plan |
 | Bicep redeploy fails on the extension | the VM was deallocated; start it and retry |
 | Deleting the resource group fails | the static IP lock is working; remove the lock first, knowing the IP will be lost |

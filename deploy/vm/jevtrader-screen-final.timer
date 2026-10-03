@@ -1,0 +1,14 @@
+[Unit]
+Description=jevtrader: final watchlist screen, after the pre-open call auction
+
+[Timer]
+# 09:08:30 IST: the equilibrium price of the 09:00-09:08 call auction is set at
+# 09:08. The screen reuses the early pass's candles and news scores, so this
+# one needs about two minutes and `run` (held back until 09:13 at most) starts
+# at the open with the list.
+OnCalendar=Mon..Fri *-*-* 09:08:30 Asia/Kolkata
+Persistent=true
+Unit=jevtrader-screen@final.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,10 @@
+[
+ {"an_dt":"04-Oct-2026 18:15:03","attchmntText":"KPIT Technologies Limited has informed the Exchange about bagging an order worth Rs 400 crore.","desc":"Bagging/Receiving of orders/contracts","seq_id":"101","sm_name":"KPIT Technologies Limited","smIndustry":"Computers - Software","symbol":"KPITTECH","attchmntFile":"https://nsearchives.nseindia.com/corporate/KPIT.pdf"},
+ {"an_dt":"04-Oct-2026 21:02:44","attchmntText":"Birlasoft Limited: Chief Financial Officer has resigned.","desc":"Resignation of Director/KMP/SMP","seq_id":"102","sm_name":"Birlasoft Limited","symbol":"BSOFT"},
+ {"an_dt":"04-Oct-2026 17:00:00","attchmntText":"Notice of the 40th AGM","desc":"Shareholders meeting","seq_id":"103","symbol":"ACC"},
+ {"an_dt":"03-Oct-2026 11:00:00","attchmntText":"Too old","desc":"Updates","seq_id":"104","symbol":"ACC"},
+ {"an_dt":"05-Oct-2026 09:10:00","attchmntText":"Too new","desc":"Updates","seq_id":"105","symbol":"ACC"},
+ {"an_dt":"04-Oct-2026 19:00:00","attchmntText":"","desc":"Updates","seq_id":"106","symbol":"ACC"},
+ {"an_dt":"04-Oct-2026 19:30:00","attchmntText":"No symbol row","desc":"Updates","seq_id":"107","symbol":""},
+ {"an_dt":"not a time","attchmntText":"Bad time","desc":"Updates","seq_id":"108","symbol":"ACC"}
+]

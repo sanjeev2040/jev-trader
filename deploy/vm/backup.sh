@@ -46,4 +46,10 @@ else
   log "no decision log at $db; skipping the SQLite backup"
 fi
 
+watchlist="$STATE_ROOT/state/watchlist/$day.json"
+if [ -f "$watchlist" ]; then
+  put "$watchlist" "watchlist/$day.json"
+  log "uploaded watchlist/$day.json"
+fi
+
 touch -r "$started" "$marker" # only after everything above succeeded

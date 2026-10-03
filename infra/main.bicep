@@ -61,6 +61,12 @@ param watchlist string
 @description('Pinned Jev model id passed to `jevtrader run --model`.')
 param jevModel string = 'jev-1.13.0'
 
+@description('Screen for the day\'s mid and small-cap watchlist before the session (`jevtrader screen`, 08:30 and 09:08 IST). `watchlist` is then only the fallback when the screen produced nothing.')
+param screenEnabled bool = true
+
+@description('Extra flags for `jevtrader screen` (weights, filters, news sources; `jevtrader screen -h`), for example `--top 6 --w-news 0.5`.')
+param screenArgs string = ''
+
 @description('Email address for the action group and the budget alerts.')
 param alertEmail string
 
@@ -277,12 +283,17 @@ var payload = [
   { name: 'lib.sh', b64: loadFileAsBase64('../deploy/vm/lib.sh') }
   { name: 'prepare.sh', b64: loadFileAsBase64('../deploy/vm/prepare.sh') }
   { name: 'wait-for-login.sh', b64: loadFileAsBase64('../deploy/vm/wait-for-login.sh') }
+  { name: 'wait-for-watchlist.sh', b64: loadFileAsBase64('../deploy/vm/wait-for-watchlist.sh') }
   { name: 'run.sh', b64: loadFileAsBase64('../deploy/vm/run.sh') }
+  { name: 'screen.sh', b64: loadFileAsBase64('../deploy/vm/screen.sh') }
   { name: 'login.sh', b64: loadFileAsBase64('../deploy/vm/login.sh') }
   { name: 'backup.sh', b64: loadFileAsBase64('../deploy/vm/backup.sh') }
   { name: 'provision.sh', b64: loadFileAsBase64('../deploy/vm/provision.sh') }
   { name: 'jevtrader-prepare.service', b64: loadFileAsBase64('../deploy/vm/jevtrader-prepare.service') }
   { name: 'jevtrader-run.service', b64: loadFileAsBase64('../deploy/vm/jevtrader-run.service') }
+  { name: 'jevtrader-screen@.service', b64: loadFileAsBase64('../deploy/vm/jevtrader-screen@.service') }
+  { name: 'jevtrader-screen-early.timer', b64: loadFileAsBase64('../deploy/vm/jevtrader-screen-early.timer') }
+  { name: 'jevtrader-screen-final.timer', b64: loadFileAsBase64('../deploy/vm/jevtrader-screen-final.timer') }
   { name: 'jevtrader-backup.service', b64: loadFileAsBase64('../deploy/vm/jevtrader-backup.service') }
   { name: 'jevtrader-backup.timer', b64: loadFileAsBase64('../deploy/vm/jevtrader-backup.timer') }
 ]
@@ -295,6 +306,8 @@ var settings = join([
   'export BACKUP_CONTAINER=\'${backupContainerName}\''
   'export WATCHLIST=\'${replace(watchlist, '\'', '')}\''
   'export JEV_MODEL=\'${replace(jevModel, '\'', '')}\''
+  'export WATCHLIST_SCREEN=\'${screenEnabled ? 'on' : 'off'}\''
+  'export SCREEN_ARGS=\'${replace(screenArgs, '\'', '')}\''
 ], '\n')
 var provisionScript = join([
   '#!/bin/bash'

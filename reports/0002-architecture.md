@@ -56,6 +56,7 @@ One process, `jevtrader`, has these subcommands:
 - `run`: trading, in paper or live mode.
 - `replay`: a backtest over stored data.
 - `backfill`: fetch historical candles over REST.
+- `screen`: write the day's watchlist before the session ([0004](0004-watchlist.md)); `run` and `replay` can read it.
 
 All of them build the same `engine` from different parts.
 
