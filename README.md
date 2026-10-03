@@ -1,6 +1,8 @@
 # jev-trader
 Realtime trading system using Zerodha Kite data and the Jev decision model
 
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the system overview and the diagrams of each workflow.
+
 ## Watchlist
 
 `jevtrader screen` picks the day's instruments before the session: NIFTY Midcap 150 and Smallcap 250 stocks (not NIFTY 50 or Next 50) that are liquid enough for intraday, ranked on news scored by Jev, sector strength and the pre-open gap. `jevtrader run --watchlist-file` trades the list and falls back to the static `--watchlist`. See [docs/run-and-replay.md](docs/run-and-replay.md#jevtrader-screen) and [reports/0004-watchlist.md](reports/0004-watchlist.md).
