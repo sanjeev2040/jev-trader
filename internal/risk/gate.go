@@ -35,9 +35,10 @@ const (
 	ReasonRotation         Reason = "rotation"         // the budget is full: an open position is being sold to make room
 	ReasonOrderRate        Reason = "order_rate_limit"
 	ReasonDailyOrderBudget Reason = "daily_order_budget"
-	ReasonMinHold          Reason = "min_hold"         // a position is being sold before its minimum holding time
-	ReasonCooldown         Reason = "reentry_cooldown" // the instrument was sold out of too recently to buy again
-	ReasonCostEdge         Reason = "cost_edge"        // the expected move does not beat the round-trip costs plus margin
+	ReasonMinHold          Reason = "min_hold"          // a position is being sold before its minimum holding time
+	ReasonCooldown         Reason = "reentry_cooldown"  // the instrument was sold out of too recently to buy again
+	ReasonCostEdge         Reason = "cost_edge"         // the expected move does not beat the round-trip costs plus margin
+	ReasonUnconfirmed      Reason = "entry_unconfirmed" // the entry call has not yet been repeated by enough consecutive decisions
 )
 
 // Exit reasons that are not also verdict reasons.
@@ -125,7 +126,9 @@ func (g *Gate) Limits() Limits {
 //  1. kill switch;
 //  2. session window (new entries only);
 //  3. daily loss limit (new entries only);
-//  4. probability threshold for the chosen action;
+//  4. probability threshold for the chosen action (an entry's is the higher
+//     EntryMinProbability) and, for an entry, EntryConfirmations consecutive
+//     decisions for the same action;
 //  5. one order in flight per instrument; an exit before the position's
 //     minimum holding time; an entry within the re-entry cooldown, shorts,
 //     the cost-aware check, the position cap and the capital budget;
@@ -153,6 +156,7 @@ func (g *Gate) Evaluate(req Request, b *Book, now time.Time) Verdict {
 	d := req.Decision
 	switch d.Action {
 	case domain.ActionHold:
+		b.resetCalls(req.Instrument.Token)
 		return Verdict{Reason: ReasonHold, Detail: d.HoldReason}
 	case domain.ActionBuy, domain.ActionSell:
 	default:
@@ -181,9 +185,21 @@ func (g *Gate) Evaluate(req Request, b *Book, now time.Time) Verdict {
 	if !reduce && b.lossHalted {
 		return refuse(ReasonDailyLoss, "day PnL %.2f breached limit -%.2f", b.PnL(), l.MaxDailyLoss)
 	}
-	// 4. Probability threshold.
-	if minP := l.MinProbability[d.Action]; d.Probability < minP {
+	// 4. Probability threshold: an entry's is the higher of the two, and a call
+	// that clears it must then be repeated EntryConfirmations times running.
+	minP := l.MinProbability[d.Action]
+	if !reduce {
+		minP = max(minP, l.EntryMinProbability)
+	}
+	if d.Probability < minP {
+		b.resetCalls(token)
 		return refuse(ReasonBelowThreshold, "%s probability %.4f below %.4f", d.Action, d.Probability, minP)
+	}
+	if reduce {
+		b.resetCalls(token)
+	} else if n := b.noteCall(token, d.Action); n < l.EntryConfirmations {
+		return refuse(ReasonUnconfirmed, "%s at probability %.2f is call %d of %d needed in a row; a HOLD, the other action or a weaker call starts the count again",
+			d.Action, d.Probability, n, l.EntryConfirmations)
 	}
 	// 5. Position checks.
 	if b.InFlight(token) {
@@ -269,6 +285,7 @@ func (g *Gate) Evaluate(req Request, b *Book, now time.Time) Verdict {
 		b.noteExit(token, now)
 	} else {
 		b.noteEntry(token, d.Probability, now)
+		b.resetCalls(token) // adding to the position needs fresh confirmation
 	}
 	return Verdict{Reason: ReasonApproved, Detail: sized, approval: newApproval(intent, SourceDecision, ReasonApproved, now)}
 }

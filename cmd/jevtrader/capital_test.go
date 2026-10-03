@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -101,7 +102,7 @@ func TestReplayUsesTheTradingCapital(t *testing.T) {
 }
 
 func TestTradingLimitsScaleWithTheBudget(t *testing.T) {
-	l := tradingLimits(config.Capital{Amount: 25_000})
+	l := tradingLimits(config.Capital{Amount: 25_000}, defaultRules(t))
 	if err := l.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +110,7 @@ func TestTradingLimitsScaleWithTheBudget(t *testing.T) {
 	if s != 1_250 || m != 2_500 || buyHoldNotional(l) != 2_500 {
 		t.Fatalf("S %v, M %v, buy-and-hold %v; want 1250, 2500, 2500 for a 25,000 budget", s, m, buyHoldNotional(l))
 	}
-	if got, _ := tradingLimits(config.Capital{Amount: 10_000}).EntryNotional(domain.SizeL); got != 2_000 {
+	if got, _ := tradingLimits(config.Capital{Amount: 10_000}, defaultRules(t)).EntryNotional(domain.SizeL); got != 2_000 {
 		t.Fatalf("L entry at 10,000 = %v, want 2000", got)
 	}
 }
@@ -133,3 +134,23 @@ func TestRunTradesTheFiftyNamesOfTodaysWatchlist(t *testing.T) {
 		t.Fatalf("instruments = %d %v, %v; want the file's 50 in rank order", len(got), got, err)
 	}
 }
+
+// defaultRules are the trading-rule flags at their defaults.
+func defaultRules(t testing.TB) *tradingRules {
+	t.Helper()
+	fs := flag.NewFlagSet("rules", flag.ContinueOnError)
+	r := addTradingRuleFlags(fs)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.validate(); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// minuteRules are the trading-rule flags that decide on every minute bar and
+// keep the pre-#53 five-minute hold and ten-minute cooldown. The replay tests
+// run a few minutes of fixture data, which the hour-long defaults would never
+// let trade.
+var minuteRules = []string{"--decide-every", "1m", "--entry-confirmations", "0", "--entry-min-probability", "0.6", "--min-hold", "5m", "--reentry-cooldown", "10m"}

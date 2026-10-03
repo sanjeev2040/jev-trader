@@ -279,7 +279,9 @@ func TestReentryCooldownFollowsARotation(t *testing.T) {
 }
 
 func TestChurnChecksAreOffWhenZero(t *testing.T) {
-	g := churnGate(t, func(l *Limits) { l.MinHold, l.ReentryCooldown, l.CostAware = 0, 0, false })
+	g := churnGate(t, func(l *Limits) {
+		l.MinHold, l.ReentryCooldown, l.CostAware, l.EntryConfirmations, l.EntryMinProbability = 0, 0, false, 0, 0
+	})
 	b := NewBook()
 	feed(b, 1, at(9, 30), 30, relPrice, 2)
 	for i := range 4 { // the RELIANCE churn goes through untouched

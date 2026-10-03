@@ -25,6 +25,7 @@ func approveSide(t testing.TB, cycle string, side domain.Action) risk.Approval {
 	t.Helper()
 	l := risk.DefaultLimits()
 	l.CapitalBudget = 250_000
+	l.EntryConfirmations = 0 // these tests are about the order manager, not call confirmation
 	g, err := risk.NewGate(l)
 	if err != nil {
 		t.Fatal(err)

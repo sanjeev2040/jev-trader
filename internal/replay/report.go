@@ -28,6 +28,7 @@ const OptimisticCaveat = "Backtests over any period before the model's release a
 type Report struct {
 	Label   string       `json:"label"`            // what data the runs replayed
 	Window  string       `json:"window,omitempty"` // the IST window of each day the runs traded, if limited
+	Rules   string       `json:"rules,omitempty"`  // how patiently the runs traded: cadence, entry bar, hold and cooldown
 	Horizon int          `json:"horizon"`          // bars ahead a directional call is scored
 	Runs    []RunMetrics `json:"runs"`
 	// Walkthrough is each run's session step by step, when asked for.
@@ -338,6 +339,9 @@ func (r *Report) WriteText(w io.Writer) error {
 		}
 	}
 	printf("Evaluation report: %s\n", r.Label)
+	if r.Rules != "" {
+		printf("Trading rules: %s\n", r.Rules)
+	}
 	if r.Window != "" {
 		printf("Trading window: %s (earlier bars of the day only warm the indicators up)\n", r.Window)
 	}

@@ -69,6 +69,7 @@ type studyOptions struct {
 	sources                                             []string
 	window                                              engine.Window
 	capital                                             config.Capital
+	rules                                               *tradingRules
 	deciders                                            []string // every decider the study replays, for the secrets it needs
 	latency, decideTimeout                              time.Duration
 	horizon                                             int
@@ -99,6 +100,7 @@ func studyCmd(ctx context.Context, args []string, e env) error {
 	noRandom := fs.Bool("no-random", false, "leave out the random list, and its backfill")
 	seed := fs.Int64("seed", 1, "seed of the random lists; the same seed, day and screened pool give the same list")
 	capitalFlag := fs.Float64("capital", 0, capitalFlagHelp)
+	rules := addTradingRuleFlags(fs)
 	latency := fs.Duration("latency", time.Second, "decision latency applied to every answer, so a result does not depend on how fast Jev answered")
 	decideTimeout := fs.Duration("decide-timeout", 20*time.Second, "per-call decider deadline; a call that misses it becomes a HOLD, which the report counts")
 	horizon := fs.Int("horizon", replay.DefaultHorizon, "bars ahead BUY and SELL calls are scored for calibration")
@@ -204,6 +206,9 @@ flags:`)
 	if *logPath == "" {
 		*logPath = filepath.Join(studyDir, "decisions.db")
 	}
+	if err := rules.validate(); err != nil {
+		return usageError{err}
+	}
 	capital, err := resolveCapital(ctx, e, *capitalFlag)
 	if err != nil {
 		return err
@@ -216,7 +221,7 @@ flags:`)
 		rnames = nil
 	}
 	screenKey := fingerprint("screen/v2", cfg.TopN, cfg.MaxPerSector, cfg.MinScore, cfg.Weights, cfg.Catalyst, cfg.Filters, cfg.NewsWindow, cfg.MaxNewsItems, srcNames, *model)
-	runKey := fingerprint("run/v1", screenKey, *start, *end, names, rnames, randomN, *seed, capital.Amount, *latency, *horizon, horizons, *model)
+	runKey := fingerprint("run/v2", screenKey, *start, *end, names, rnames, randomN, *seed, capital.Amount, rules.String(), *latency, *horizon, horizons, *model)
 
 	sc := study.Config{
 		From: first.Format(time.DateOnly), To: last.Format(time.DateOnly), Dir: studyDir, Calendar: cal,
@@ -229,7 +234,7 @@ flags:`)
 		d, closeDeps, err := buildStudyDeps(ctx, e, studyOptions{
 			dataDir: *dataDir, studyDir: studyDir, stateDir: *stateDir, kiteURL: lookup(e, "KITE_API_BASE_URL"),
 			jevURL: *jevURL, model: *model, first: first, last: last, screen: cfg, sources: srcNames,
-			window: window, capital: capital, deciders: append(slices.Clone(names), rnames...), latency: *latency, decideTimeout: *decideTimeout,
+			window: window, capital: capital, rules: rules, deciders: append(slices.Clone(names), rnames...), latency: *latency, decideTimeout: *decideTimeout,
 			horizon: *horizon, lookahead: horizons, logPath: *logPath,
 		}, sc.Logger)
 		if err != nil {
@@ -247,7 +252,7 @@ flags:`)
 		fmt.Fprintf(e.stderr, "jevtrader study: stopped: %v\nThe %d day(s) done are stored; run again to resume, or add --report-only for a report of them.\n", runErr, len(results))
 	}
 	summary := study.Summarize(sc.From, sc.To, results)
-	meta := study.Meta{Generated: time.Now(), Horizon: *horizon, Settings: studySettings(sc, cfg, srcNames, *start, *end, *model, capital, *latency, horizons)}
+	meta := study.Meta{Generated: time.Now(), Horizon: *horizon, Settings: studySettings(sc, cfg, srcNames, *start, *end, *model, capital, rules, *latency, horizons)}
 	if err := writeStudyReport(e, *out, studyDir, summary, meta); err != nil {
 		return err
 	}
@@ -315,7 +320,7 @@ func fingerprint(parts ...any) string {
 	return hex.EncodeToString(sum[:6])
 }
 
-func studySettings(sc study.Config, cfg screen.Config, sources []string, start, end, model string, capital config.Capital, latency time.Duration, lookahead []time.Duration) [][2]string {
+func studySettings(sc study.Config, cfg screen.Config, sources []string, start, end, model string, capital config.Capital, rules *tradingRules, latency time.Duration, lookahead []time.Duration) [][2]string {
 	random := fmt.Sprintf("%d stocks of the screened pool, seed %d, replayed with %s", sc.RandomN, sc.Seed, strings.Join(sc.RandomDeciders, ", "))
 	switch {
 	case sc.RandomN < 0:
@@ -336,6 +341,7 @@ func studySettings(sc study.Config, cfg screen.Config, sources []string, start, 
 		{"Random list", random},
 		{"Jev model", model},
 		{"Capital", fmt.Sprintf("₹%.0f (%s)", capital.Amount, capital.Source)},
+		{"Trading rules", rules.String()},
 		{"Decision latency", latency.String()},
 		{"Candles", "Kite 1m historical candles (not tick-built bars)"},
 		{"Keys", "screen " + sc.ScreenKey + ", run " + sc.RunKey},
@@ -602,14 +608,14 @@ func (r *studyReplayer) replay(ctx context.Context, req study.ReplayRequest) (*r
 		cached = &study.CachedDecider{Inner: client, Model: r.o.model, Store: r.answers}
 		specs = append(specs, replay.Spec{Name: "jev", Decider: cached})
 	}
-	limits := tradingLimits(r.o.capital)
+	limits := tradingLimits(r.o.capital, r.o.rules)
 	rep, err := replay.Run(ctx, replay.Config{
 		Log: r.log,
 		NewSource: func() (marketdata.Source, error) {
 			return mdreplay.New(src)
 		},
 		SourceName: string(src.Kind), Label: src.Label(),
-		Limits: limits, Paper: paper.DefaultConfig(), Bars: bars.Config{},
+		Limits: limits, Paper: paper.DefaultConfig(), Bars: bars.Config{}, DecideEvery: r.o.rules.decideEvery, Rules: r.o.rules.String(),
 		Snapshot:   snapshot.Config{SizeThresholds: sizeThresholds(limits)},
 		IndexToken: r.index.Token, RunPrefix: fmt.Sprintf("study-%s-%s-%s", req.Day, req.List, time.Now().UTC().Format("150405.000000")),
 		Window: r.o.window, Latency: r.o.latency, DecideTimeout: r.o.decideTimeout, Horizon: r.o.horizon,

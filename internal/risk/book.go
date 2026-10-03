@@ -22,6 +22,7 @@ type Book struct {
 	entries   map[uint32]entry           // how and when the bot opened each position
 	exits     map[uint32]time.Time       // when the bot last approved an exit in each instrument
 	ranges    map[uint32][]rangeBucket   // recent price range per instrument, one bucket a minute
+	streaks   map[uint32]streak          // consecutive same-action entry calls per instrument
 	marks     map[uint32]float64
 	inflight  map[uint32]domain.OrderIntent // unfilled remainder of each in-flight order
 
@@ -39,6 +40,13 @@ type Book struct {
 type entry struct {
 	probability float64
 	at          time.Time
+}
+
+// streak is the run of consecutive decisions on an instrument that chose the
+// same action at or above the entry threshold.
+type streak struct {
+	action domain.Action
+	n      int
 }
 
 // rangeBucket is the high and low of the prices seen in one minute.
@@ -59,6 +67,7 @@ func NewBook() *Book {
 		entries:   map[uint32]entry{},
 		exits:     map[uint32]time.Time{},
 		ranges:    map[uint32][]rangeBucket{},
+		streaks:   map[uint32]streak{},
 		marks:     map[uint32]float64{},
 		inflight:  map[uint32]domain.OrderIntent{},
 	}
@@ -136,6 +145,23 @@ func (b *Book) recentRange(token uint32, now time.Time, window time.Duration) (f
 
 // noteExit records that an exit was approved in the instrument at now.
 func (b *Book) noteExit(token uint32, now time.Time) { b.exits[token] = now }
+
+// noteCall counts a decision toward the instrument's confirmation streak and
+// returns the streak's length: it grows when the decision is the same action
+// as the last one, and starts again at one otherwise.
+func (b *Book) noteCall(token uint32, a domain.Action) int {
+	s := b.streaks[token]
+	if s.action == a {
+		s.n++
+	} else {
+		s = streak{action: a, n: 1}
+	}
+	b.streaks[token] = s
+	return s.n
+}
+
+// resetCalls forgets the instrument's confirmation streak.
+func (b *Book) resetCalls(token uint32) { delete(b.streaks, token) }
 
 // SetPosition replaces the bot's own position in an instrument, for example
 // when restoring what the bot itself opened earlier in the day from its
@@ -299,6 +325,7 @@ func (b *Book) rollDay(now time.Time) {
 		b.dayOrders = 0
 		b.lossHalted = false
 		b.rejections = 0
+		clear(b.streaks) // a call confirmed yesterday is not confirmation today
 	}
 	b.day = day
 }
