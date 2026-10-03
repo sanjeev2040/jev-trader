@@ -49,6 +49,12 @@ param backupContainerName string = 'backups'
 @description('GitHub repository (owner/name) whose workflows may log in through OIDC.')
 param githubRepo string = 'sanjeev2040/jev-trader'
 
+@description('Numeric GitHub ID of the repository owner (gh api users/OWNER --jq .id). The OIDC subject carries it.')
+param githubOwnerId string = '22476366'
+
+@description('Numeric GitHub ID of the repository (gh api repos/OWNER/REPO --jq .id). The OIDC subject carries it.')
+param githubRepoId string = '1401087829'
+
 @description('Instruments `jevtrader run` trades, comma separated EXCHANGE:SYMBOL keys, for example NSE:INFY,NSE:TCS.')
 param watchlist string
 
@@ -283,7 +289,7 @@ var payload = [
 var unpack = join(map(payload, f => 'echo ${f.b64} | base64 -d > "$d/${f.name}"'), '\n')
 // Single quotes are dropped so a value cannot break out of its quoting.
 var settings = join([
-  'export ACR_LOGIN_SERVER=\'${acr.name}.${environment().suffixes.acrLoginServer}\''
+  'export ACR_LOGIN_SERVER=\'${acr.properties.loginServer}\''
   'export KEY_VAULT_NAME=\'${kv.name}\''
   'export BACKUP_ACCOUNT=\'${storage.name}\''
   'export BACKUP_CONTAINER=\'${backupContainerName}\''
@@ -319,6 +325,11 @@ resource provision 'Microsoft.Compute/virtualMachines/extensions@2024-03-01' = {
 // Two identities, so the schedule cannot deploy and the deploy cannot start or
 // stop the VM. Subjects name GitHub *environments*, not branches: the cron runs
 // on the default branch (dev) while releases come from main.
+// GitHub puts the numeric owner and repository IDs in the OIDC subject
+// (repo:OWNER@OWNER_ID/REPO@REPO_ID:environment:ENV), so name-only subjects never match.
+var githubRepoParts = split(githubRepo, '/')
+var githubSubjectPrefix = 'repo:${githubRepoParts[0]}@${githubOwnerId}/${githubRepoParts[1]}@${githubRepoId}'
+
 resource deployIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: 'id-gh-jevtrader-deploy'
   location: location
@@ -326,10 +337,10 @@ resource deployIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-0
 
 resource deployFederation 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = {
   parent: deployIdentity
-  name: 'github-production'
+  name: 'github-production-ids'
   properties: {
     issuer: 'https://token.actions.githubusercontent.com'
-    subject: 'repo:${githubRepo}:environment:production'
+    subject: '${githubSubjectPrefix}:environment:production'
     audiences: ['api://AzureADTokenExchange']
   }
 }
@@ -341,10 +352,10 @@ resource scheduleIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023
 
 resource scheduleFederation 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = {
   parent: scheduleIdentity
-  name: 'github-market-hours'
+  name: 'github-market-hours-ids'
   properties: {
     issuer: 'https://token.actions.githubusercontent.com'
-    subject: 'repo:${githubRepo}:environment:market-hours'
+    subject: '${githubSubjectPrefix}:environment:market-hours'
     audiences: ['api://AzureADTokenExchange']
   }
 }
