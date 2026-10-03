@@ -15,7 +15,7 @@ param githubRepo = 'sanjeev2040/jev-trader'
 
 // Instruments to paper-trade and the pinned Jev model id.
 param watchlist = 'NSE:INFY,NSE:TCS'
-param jevModel = 'REPLACE_ME'
+param jevModel = 'jev-1.13.0'
 
 param alertEmail = 'REPLACE_ME@example.com'
 param budgetAmount = 25

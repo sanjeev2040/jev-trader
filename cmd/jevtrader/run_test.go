@@ -99,8 +99,8 @@ func TestRunValidatesInput(t *testing.T) {
 		}
 	}
 	e, _, stderr := testEnv(map[string]string{"KITE_API_KEY": "k", "KITE_API_SECRET": "s", "JEV_API_KEY": "j"})
-	if code := run(context.Background(), []string{"run", "--watchlist", "NSE:INFY"}, e); code != 2 || !strings.Contains(stderr.String(), "--model") {
-		t.Errorf("no model: code %d, stderr %q", code, stderr.String())
+	if code := run(context.Background(), []string{"run", "--watchlist", "NSE:INFY", "--model", "jev-latest"}, e); code != 2 || !strings.Contains(stderr.String(), "jev-latest") {
+		t.Errorf("unpinned model: code %d, stderr %q", code, stderr.String())
 	}
 }
 
@@ -248,14 +248,14 @@ func TestReplayCommandValidatesInput(t *testing.T) {
 		"unknown decider":  {"--deciders", "oracle"},
 		"duplicate":        {"--deciders", "hold,hold"},
 		"jev without key":  {"--deciders", "jev", "--model", "m"},
-		"jev no model":     {"--deciders", "jev"},
+		"jev unpinned":     {"--deciders", "jev", "--model", "jev-latest"},
 		"recorded no id":   {"--deciders", "recorded"},
 		"recorded unknown": {"--deciders", "recorded:nope"},
 		"stray argument":   {"extra"},
 	} {
 		e, _, stderr := testEnv(map[string]string{"JEV_API_KEY": ""})
 		full := append([]string{"replay", "--data-dir", root, "--log", log}, args...)
-		if name == "jev no model" {
+		if name == "jev unpinned" {
 			e, _, stderr = testEnv(map[string]string{"JEV_API_KEY": "j"})
 		}
 		if code := run(context.Background(), full, e); code != 2 {

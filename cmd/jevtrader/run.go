@@ -19,6 +19,7 @@ import (
 	"github.com/sanjeev2040/jev-trader/internal/decisionlog"
 	"github.com/sanjeev2040/jev-trader/internal/domain"
 	"github.com/sanjeev2040/jev-trader/internal/engine"
+	"github.com/sanjeev2040/jev-trader/internal/jev"
 	"github.com/sanjeev2040/jev-trader/internal/kiteauth"
 	"github.com/sanjeev2040/jev-trader/internal/marketdata"
 	"github.com/sanjeev2040/jev-trader/internal/marketdata/kite"
@@ -53,7 +54,7 @@ func trade(ctx context.Context, args []string, e env) error {
 	liveEnabled := fs.Bool("live-enabled", false, "live.enabled: one of the two switches live trading needs besides --mode=live (it is also gated off in code)")
 	watchlist := fs.String("watchlist", "", `comma-separated instruments, e.g. "NSE:INFY,NSE:TCS" (exact EXCHANGE:SYMBOL keys; required)`)
 	indexKey := fs.String("index", "NSE:NIFTY 50", `index used as snapshot context and never traded; "" for none`)
-	model := fs.String("model", "", "pinned Jev model id (required)")
+	model := fs.String("model", jev.DefaultModel, "pinned Jev model id (\"jev-latest\" is rejected)")
 	jevURL := fs.String("jev-url", "", "Jev base URL (default: the public API)")
 	decideTimeout := fs.Duration("decide-timeout", engine.DefaultDecideTimeout, "per-call Jev deadline")
 	dataDir := fs.String("data-dir", "data", "directory for ticks, bars and the cached instrument master")
@@ -62,7 +63,7 @@ func trade(ctx context.Context, args []string, e env) error {
 	record := fs.Bool("record", true, "also record ticks and closed bars under --data-dir")
 	buffer := fs.Int("buffer", 8192, "market-data channel capacity")
 	fs.Usage = func() {
-		fmt.Fprintln(e.stderr, "usage: jevtrader run --watchlist NSE:INFY,NSE:TCS --model <jev-model-id> [flags]\n\nTrades on live Kite data with Jev decisions, the risk gate and the paper broker.\nRun `jevtrader login` first. Reads KITE_API_KEY, KITE_API_SECRET and JEV_API_KEY.\n\nflags:")
+		fmt.Fprintln(e.stderr, "usage: jevtrader run --watchlist NSE:INFY,NSE:TCS [flags]\n\nTrades on live Kite data with Jev decisions, the risk gate and the paper broker.\nRun `jevtrader login` first. Reads KITE_API_KEY, KITE_API_SECRET and JEV_API_KEY.\n\nflags:")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {

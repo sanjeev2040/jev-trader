@@ -1,7 +1,7 @@
 // Package jev is a typed HTTP client for Jev's POST /v1/systemone endpoint.
 //
 // It asks two choice questions, action ∈ {BUY, SELL, HOLD} and size ∈ {S, M, L},
-// and returns the answers as a domain.Decision. Every failure is returned as a
+// keyed by id in the request's questions map, and returns the answers as a domain.Decision. Every failure is returned as a
 // *domain.DecideError carrying a reason code.
 package jev
 
@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"strconv"
@@ -22,7 +23,9 @@ import (
 )
 
 const (
-	DefaultBaseURL     = "https://api.typesafe.ai"
+	DefaultBaseURL = "https://api.typesafe.ai"
+	// DefaultModel is the pinned System One model used when none is configured.
+	DefaultModel       = "jev-1.13.0"
 	DefaultTimeout     = 800 * time.Millisecond
 	DefaultMaxAttempts = 3
 	DefaultMinBackoff  = 50 * time.Millisecond
@@ -36,14 +39,15 @@ const (
 	maxResponseBytes     = 1 << 20
 )
 
-// Config configures a Client. Model and APIKey are required.
+// Config configures a Client. APIKey is required.
 type Config struct {
 	// BaseURL defaults to DefaultBaseURL.
 	BaseURL string
 	// APIKey is sent as a bearer token. Callers read it from JEV_API_KEY.
 	APIKey string
-	// Model is an explicit, pinned model id. "jev-latest" is rejected so a
-	// server-side model upgrade is always a visible config change.
+	// Model is an explicit, pinned model id. It defaults to DefaultModel;
+	// "jev-latest" is rejected so a server-side model upgrade is always a
+	// visible config change.
 	Model string
 	// Timeout bounds a call whose context has no deadline. Defaults to
 	// DefaultTimeout.
@@ -57,6 +61,9 @@ type Config struct {
 	MaxBackoff time.Duration
 	// HTTPClient defaults to a new http.Client.
 	HTTPClient *http.Client
+	// Logger receives the response model id and token usage of each call.
+	// Defaults to slog.Default().
+	Logger *slog.Logger
 }
 
 // Client calls Jev. It is safe for concurrent use.
@@ -69,6 +76,7 @@ type Client struct {
 	minBackoff  time.Duration
 	maxBackoff  time.Duration
 	http        *http.Client
+	log         *slog.Logger
 }
 
 // New validates cfg and returns a Client.
@@ -77,7 +85,7 @@ func New(cfg Config) (*Client, error) {
 		return nil, errors.New("jev: API key is required")
 	}
 	if cfg.Model == "" {
-		return nil, errors.New("jev: model id is required")
+		cfg.Model = DefaultModel
 	}
 	if cfg.Model == "jev-latest" {
 		return nil, errors.New("jev: pin an explicit model id, not jev-latest")
@@ -100,6 +108,9 @@ func New(cfg Config) (*Client, error) {
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{}
 	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
 	return &Client{
 		url:         strings.TrimRight(cfg.BaseURL, "/") + endpointPath,
 		apiKey:      cfg.APIKey,
@@ -109,6 +120,7 @@ func New(cfg Config) (*Client, error) {
 		minBackoff:  cfg.MinBackoff,
 		maxBackoff:  cfg.MaxBackoff,
 		http:        cfg.HTTPClient,
+		log:         cfg.Logger,
 	}, nil
 }
 
@@ -140,6 +152,8 @@ func (c *Client) Decide(ctx context.Context, state json.RawMessage) (domain.Deci
 				return domain.Decision{}, err
 			}
 			d.Latency = time.Since(start)
+			c.log.Info("jev answer", "requested_model", c.model, "model", d.Model,
+				"input_tokens", d.InputTokens, "output_tokens", d.OutputTokens, "attempts", attempt)
 			return d, nil
 		}
 		derr := statusError(status, raw)
@@ -244,22 +258,15 @@ func parse(raw []byte) (domain.Decision, error) {
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return domain.Decision{}, invalid("decode response: %v", err)
 	}
-	var act, size *answer
-	for i := range resp.Answers {
-		switch resp.Answers[i].ID {
-		case questionAction:
-			act = &resp.Answers[i]
-		case questionSize:
-			size = &resp.Answers[i]
-		}
-	}
-	if act == nil || size == nil {
+	act, okA := resp.Answers[questionAction]
+	size, okS := resp.Answers[questionSize]
+	if !okA || !okS {
 		return domain.Decision{}, invalid("missing action or size answer")
 	}
-	if err := checkChoice(act, questions[0].Options); err != nil {
+	if err := checkChoice(questionAction, &act, actionOptions); err != nil {
 		return domain.Decision{}, err
 	}
-	if err := checkChoice(size, questions[1].Options); err != nil {
+	if err := checkChoice(questionSize, &size, sizeOptions); err != nil {
 		return domain.Decision{}, err
 	}
 
@@ -283,9 +290,9 @@ func parse(raw []byte) (domain.Decision, error) {
 
 // checkChoice requires a choice answer whose chosen option and every
 // probability key are known options, and whose probabilities sum to about 1.
-func checkChoice(a *answer, options []string) error {
+func checkChoice(id string, a *answer, options []string) error {
 	if a.Type != "" && a.Type != typeChoice {
-		return invalid("%s: answer type %q, want %q", a.ID, a.Type, typeChoice)
+		return invalid("%s: answer type %q, want %q", id, a.Type, typeChoice)
 	}
 	known := func(o string) bool {
 		for _, k := range options {
@@ -296,23 +303,23 @@ func checkChoice(a *answer, options []string) error {
 		return false
 	}
 	if !known(a.Choice) {
-		return invalid("%s: unknown option %q", a.ID, a.Choice)
+		return invalid("%s: unknown option %q", id, a.Choice)
 	}
 	if _, ok := a.Probabilities[a.Choice]; !ok {
-		return invalid("%s: no probability for chosen option %q", a.ID, a.Choice)
+		return invalid("%s: no probability for chosen option %q", id, a.Choice)
 	}
 	sum := 0.0
 	for o, p := range a.Probabilities {
 		if !known(o) {
-			return invalid("%s: probability for unknown option %q", a.ID, o)
+			return invalid("%s: probability for unknown option %q", id, o)
 		}
 		if math.IsNaN(p) || p < 0 || p > 1 {
-			return invalid("%s: probability %v for %q out of range", a.ID, p, o)
+			return invalid("%s: probability %v for %q out of range", id, p, o)
 		}
 		sum += p
 	}
 	if math.Abs(sum-1) > probabilityTolerance {
-		return invalid("%s: probabilities sum to %v", a.ID, sum)
+		return invalid("%s: probabilities sum to %v", id, sum)
 	}
 	return nil
 }
