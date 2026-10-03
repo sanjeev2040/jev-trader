@@ -12,6 +12,9 @@ param adminSshPublicKey = 'REPLACE_ME ssh-ed25519 AAAA...'
 param operatorCidr = 'REPLACE_ME/32'
 
 param githubRepo = 'sanjeev2040/jev-trader'
+// The OIDC subject carries numeric IDs: gh api users/OWNER --jq .id ; gh api repos/OWNER/REPO --jq .id
+param githubOwnerId = '22476366'
+param githubRepoId = '1401087829'
 
 // Instruments to paper-trade and the pinned Jev model id.
 param watchlist = 'NSE:INFY,NSE:TCS'

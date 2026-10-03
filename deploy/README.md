@@ -95,10 +95,17 @@ Created by the template as user-assigned managed identities, with federated cred
 
 | Identity (output) | Federated subject | Roles |
 | --- | --- | --- |
-| `id-gh-jevtrader-deploy` (`deployClientId`) | `repo:sanjeev2040/jev-trader:environment:production` | `AcrPush` on the registry; `Tag Contributor` on the VM |
-| `id-gh-jevtrader-schedule` (`scheduleClientId`) | `repo:sanjeev2040/jev-trader:environment:market-hours` | custom role on the VM: read, instance view, start, deallocate |
+| `id-gh-jevtrader-deploy` (`deployClientId`) | `repo:sanjeev2040@22476366/jev-trader@1401087829:environment:production` | `AcrPush` on the registry; `Tag Contributor` on the VM |
+| `id-gh-jevtrader-schedule` (`scheduleClientId`) | `repo:sanjeev2040@22476366/jev-trader@1401087829:environment:market-hours` | custom role on the VM: read, instance view, start, deallocate |
 
-If you use a fork or another repository name, set the `githubRepo` parameter. No client secret exists for either identity.
+GitHub puts the numeric owner and repository IDs in the OIDC subject (`repo:OWNER@OWNER_ID/REPO@REPO_ID:environment:ENV`), so a name-only subject fails with `AADSTS700213`. If you use a fork or another repository name, set `githubRepo` plus `githubOwnerId` and `githubRepoId`, read with:
+
+```bash
+gh api users/OWNER --jq .id          # githubOwnerId
+gh api repos/OWNER/REPO --jq .id     # githubRepoId
+```
+
+The credentials are named `github-production-ids` and `github-market-hours-ids`. Older deployments may still carry name-based `github-production` and `github-market-hours`; they never match and can be deleted (`az identity federated-credential delete`). No client secret exists for either identity.
 
 ### 6. GitHub variables and environments
 
@@ -214,7 +221,7 @@ At 15:40 IST the backup timer copies the new Parquet files and a consistent SQLi
 | Symptom | Look at |
 | --- | --- |
 | Workflow summary says "Azure is not configured yet" | the repository variables in step 6 |
-| `azure/login` fails with `AADSTS70021` or "No matching federated identity record" | the environment name and `githubRepo` must match the credential subject exactly; check `AZURE_CLIENT_ID` is set on the *environment*, not only on the repository |
+| `azure/login` fails with `AADSTS70021` or "No matching federated identity record" | the environment name, `githubRepo` and the numeric `githubOwnerId`/`githubRepoId` must match the credential subject exactly (`AADSTS700213` shows the subject GitHub presented); check `AZURE_CLIENT_ID` is set on the *environment*, not only on the repository |
 | `jevtrader-prepare` says "no valid jev-image tag" | no release has run yet; merge to `main` or run the Release workflow |
 | `jevtrader-prepare` cannot read a secret | the secret is not set, or the Key Vault role assignment has not propagated yet (it retries every 30 s) |
 | `jevtrader-run` keeps restarting | `journalctl -u jevtrader-run`: usually Kite rejecting the session; log in again |
