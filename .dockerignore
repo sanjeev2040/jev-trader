@@ -1,0 +1,15 @@
+# Keep the build context to what `go build` needs; secrets and local data never
+# enter an image (reports/0002-architecture.md).
+.git
+.github
+.env
+config.yaml
+data/
+state/
+/jevtrader
+infra/
+deploy/
+reports/
+docs/
+*.md
+**/*_test.go

@@ -1,0 +1,8 @@
+{
+  "model": "jev-1.13.0",
+  "answers": {
+    "action": {"type": "choice", "choice": "BUY", "probabilities": {"BUY": 0.62, "SELL": 0.08, "HOLD": 0.30}, "confidence": 0.62},
+    "size": {"type": "choice", "choice": "M", "probabilities": {"S": 0.25, "M": 0.55, "L": 0.20}, "confidence": 0.55}
+  },
+  "usage": {"input_tokens": 187, "output_tokens": 0}
+}

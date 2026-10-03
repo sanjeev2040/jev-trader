@@ -1,0 +1,11 @@
+# Secrets and local runtime data never enter the repository (reports/0002-architecture.md).
+.env
+config.yaml
+data/
+state/
+
+# Build output.
+/jevtrader
+
+# Local deployment parameters (hold your IP and email).
+infra/*.local.bicepparam
