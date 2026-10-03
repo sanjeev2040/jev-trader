@@ -3,7 +3,7 @@
 Both subcommands build the same engine (`internal/engine`) from different
 edges, as described in [reports/0002-architecture.md](../reports/0002-architecture.md).
 
-`jevtrader screen` runs before either: it writes the day's [watchlist file](#jevtrader-screen) that `run` and `replay` can read.
+`jevtrader screen` runs before either: it writes the day's [watchlist file](#jevtrader-screen) that `run` and `replay` can read. `jevtrader study` runs screen, backfill and replay over many past days and aggregates them: see [picker-study.md](picker-study.md).
 
 | | `run` | `replay` |
 | --- | --- | --- |

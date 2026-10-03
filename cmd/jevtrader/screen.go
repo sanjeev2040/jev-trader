@@ -14,6 +14,7 @@ import (
 	kiteconnect "github.com/zerodha/gokiteconnect/v4"
 
 	"github.com/sanjeev2040/jev-trader/internal/config"
+	"github.com/sanjeev2040/jev-trader/internal/domain"
 	"github.com/sanjeev2040/jev-trader/internal/jev"
 	"github.com/sanjeev2040/jev-trader/internal/marketdata/kite"
 	"github.com/sanjeev2040/jev-trader/internal/news"
@@ -232,39 +233,64 @@ func parseNewsSources(list string) ([]string, error) {
 	return out, nil
 }
 
-func realScreenDeps(ctx context.Context, e env, o screenOptions, logger *slog.Logger) (screen.Deps, error) {
+// kiteConn is a Kite client and the session behind it.
+type kiteConn struct {
+	client                       *kiteconnect.Client
+	apiKey, accessToken, baseURL string
+}
+
+// connectKite opens a Kite client from KITE_API_KEY (or the Key Vault) and the
+// saved session or KITE_ACCESS_TOKEN.
+func connectKite(ctx context.Context, e env, stateDir, baseURL string) (kiteConn, error) {
 	secrets, err := loadSecrets(ctx, e, config.EnvKiteAPIKey)
 	if err != nil {
-		return screen.Deps{}, usageError{err}
+		return kiteConn{}, usageError{err}
 	}
 	if secrets.KiteAPIKey.IsZero() {
-		return screen.Deps{}, usageError{errors.New("KITE_API_KEY is not set")}
+		return kiteConn{}, usageError{errors.New("KITE_API_KEY is not set")}
 	}
 	apiKey := secrets.KiteAPIKey.Reveal()
 	accessToken := lookup(e, "KITE_ACCESS_TOKEN")
 	if accessToken == "" {
-		accessToken = savedAccessToken(ctx, o.stateDir)
+		accessToken = savedAccessToken(ctx, stateDir)
 	}
 	if accessToken == "" {
-		return screen.Deps{}, usageError{errors.New("no Kite session: run `jevtrader login` (or set KITE_ACCESS_TOKEN)")}
+		return kiteConn{}, usageError{errors.New("no Kite session: run `jevtrader login` (or set KITE_ACCESS_TOKEN)")}
 	}
 	kc := kiteconnect.New(apiKey)
 	kc.SetAccessToken(accessToken)
-	if o.kiteURL != "" {
-		kc.SetBaseURI(o.kiteURL)
+	if baseURL != "" {
+		kc.SetBaseURI(baseURL)
 	}
+	return kiteConn{client: kc, apiKey: apiKey, accessToken: accessToken, baseURL: baseURL}, nil
+}
 
-	now := time.Now()
-	master, err := kite.LoadMaster(ctx, o.dataDir, now, []string{"NSE"}, kite.HTTPMasterFetcher(nil, o.kiteURL, apiKey, staticToken(accessToken)))
+// loadNSEMaster returns Kite's NSE instrument master, cached per day under dataDir.
+func loadNSEMaster(ctx context.Context, c kiteConn, dataDir string) ([]domain.Instrument, error) {
+	return kite.LoadMaster(ctx, dataDir, time.Now(), []string{"NSE"}, kite.HTTPMasterFetcher(nil, c.baseURL, c.apiKey, staticToken(c.accessToken)))
+}
+
+func realScreenDeps(ctx context.Context, e env, o screenOptions, logger *slog.Logger) (screen.Deps, error) {
+	conn, err := connectKite(ctx, e, o.stateDir, o.kiteURL)
 	if err != nil {
 		return screen.Deps{}, err
 	}
+	master, err := loadNSEMaster(ctx, conn, o.dataDir)
+	if err != nil {
+		return screen.Deps{}, err
+	}
+	return screenDepsFor(ctx, e, o, conn, master, logger)
+}
+
+// screenDepsFor connects the screen to NSE, the news sources and Jev, and to
+// Kite through conn, whose instrument master is master.
+func screenDepsFor(ctx context.Context, e env, o screenOptions, conn kiteConn, master []domain.Instrument, logger *slog.Logger) (screen.Deps, error) {
 	tokens := make(map[string]uint32, len(master))
 	for _, in := range master {
 		tokens[in.Exchange+":"+in.Symbol] = in.Token
 	}
 
-	d := screen.Deps{NSE: universe.HTTPFetcher(nil, "", ""), Market: screen.NewKite(kc, tokens), Model: o.model, Logger: logger}
+	d := screen.Deps{NSE: universe.HTTPFetcher(nil, "", ""), Market: screen.NewKite(conn.client, tokens), Model: o.model, Logger: logger}
 	for _, name := range o.sources {
 		if name == nseAnnouncementsName {
 			d.News = append(d.News, news.NSEAnnouncements{})

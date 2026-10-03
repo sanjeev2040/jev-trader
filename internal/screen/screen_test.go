@@ -712,3 +712,56 @@ func TestSecondPassReusesTheEarlyNewsScores(t *testing.T) {
 		t.Errorf("early news score lost when Jev went down: %v", again.Entries[0].Signals)
 	}
 }
+
+func TestKeepPoolRecordsEveryScreenedStockAndTheNewsTokens(t *testing.T) {
+	deps := Deps{NSE: nseFetcher(), Market: &fakeMarket{}, News: testNews(), Jev: &fakeJev{}, Model: "jev-1.13.0"}
+	cfg := baseConfig(t, watchlist.PhaseEarly, earlyNow)
+	without, err := Run(context.Background(), cfg, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(without.Pool) != 0 {
+		t.Errorf("a pool was kept unasked: %d stocks", len(without.Pool))
+	}
+
+	cfg = baseConfig(t, watchlist.PhaseEarly, earlyNow)
+	cfg.KeepPool = true
+	f, err := Run(context.Background(), cfg, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Pool) <= len(f.Entries) {
+		t.Fatalf("pool of %d does not exceed the %d picks", len(f.Pool), len(f.Entries))
+	}
+	pool := map[string]watchlist.PoolEntry{}
+	for _, p := range f.Pool {
+		pool[p.Key] = p
+	}
+	for _, e := range f.Entries {
+		p, ok := pool[e.Key]
+		if !ok || p.Score != e.Score || p.Sector != e.Sector || p.Signals[SignalRange] != e.Signals[SignalRange] {
+			t.Errorf("pick %s is not in the pool as it was picked: %+v", e.Key, p)
+		}
+	}
+	// Illiquid and large-cap stocks never reach the pool.
+	for _, never := range []string{"ABB", "ILLIQUID", "PENNY", "FLAGGED"} {
+		if _, ok := pool["NSE:"+never]; ok {
+			t.Errorf("%s is in the pool", never)
+		}
+	}
+	if s, ok := source(f, "jev"); !ok || s.InputTokens != 1200 {
+		t.Errorf("jev source tokens = %+v", s)
+	}
+	// The pool survives a round trip through the file.
+	path := watchlist.Path(t.TempDir(), f.Date)
+	if err := watchlist.Write(path, f); err != nil {
+		t.Fatal(err)
+	}
+	back, err := watchlist.Read(path)
+	if err != nil || len(back.Pool) != len(f.Pool) {
+		t.Fatalf("read back: %v, %d of %d pool entries", err, len(back.Pool), len(f.Pool))
+	}
+	if s, _ := source(back, "jev"); s.InputTokens != 1200 {
+		t.Errorf("tokens lost in the file: %+v", s)
+	}
+}

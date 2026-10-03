@@ -35,6 +35,10 @@ type candidate struct {
 	gap   *float64 // percent; nil without a pre-open quote
 }
 
+// DailyLookbackDays is how many calendar days of daily candles the screen
+// reads before the screened day.
+const DailyLookbackDays = 45
+
 // minGapShare is the share of candidates whose quote must differ from the
 // previous close for the pre-open gap to count as read. Before pre-open prices
 // exist a quote repeats the last close, and a column of zeros is not a signal.
@@ -141,6 +145,15 @@ func Run(ctx context.Context, cfg Config, d Deps) (watchlist.File, error) {
 		ranked = append(ranked, rankedEntry{cand: c, score: score, contrib: contrib, signals: signals})
 	}
 	file.Entries = pick(cfg, ranked, newsRefs, sectors)
+	if cfg.KeepPool {
+		for _, r := range ranked {
+			p := watchlist.PoolEntry{Key: r.cand.stock.Key(), Sector: r.cand.stock.Industry, Score: round(r.score, 3), Signals: map[string]float64{}}
+			for name, v := range r.signals {
+				p.Signals[name] = round(v, 3)
+			}
+			file.Pool = append(file.Pool, p)
+		}
+	}
 	if len(file.Entries) == 0 {
 		return file, fmt.Errorf("no stock scored above %.2f", cfg.MinScore)
 	}
@@ -161,7 +174,7 @@ func fetchCandles(ctx context.Context, cfg Config, d Deps, stocks []universe.Sto
 		return nil, err
 	}
 	day, _ := time.ParseInLocation(time.DateOnly, date, watchlist.IST)
-	from, to := day.AddDate(0, 0, -45), day.Add(-time.Second)
+	from, to := day.AddDate(0, 0, -DailyLookbackDays), day.Add(-time.Second)
 	out := make(map[string][]Candle, len(stocks))
 	var failed int
 	var firstErr error
