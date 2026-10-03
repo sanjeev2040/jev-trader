@@ -119,8 +119,8 @@ Environments, each with its own `AZURE_CLIENT_ID` (a different identity in each)
 ```sh
 gh api -X PUT repos/$REPO/environments/production   -F 'deployment_branch_policy[protected_branches]=false' -F 'deployment_branch_policy[custom_branch_policies]=true'
 gh api -X PUT repos/$REPO/environments/market-hours -F 'deployment_branch_policy[protected_branches]=false' -F 'deployment_branch_policy[custom_branch_policies]=true'
-gh api -X POST repos/$REPO/environments/production/deployment-branches   -f name=main
-gh api -X POST repos/$REPO/environments/market-hours/deployment-branches -f name=dev   # the default branch: scheduled runs use it
+gh api -X POST repos/$REPO/environments/production/deployment-branch-policies   -f name=main -f type=branch
+gh api -X POST repos/$REPO/environments/market-hours/deployment-branch-policies -f name=dev -f type=branch   # the default branch: scheduled runs use it
 gh variable set AZURE_CLIENT_ID --repo $REPO --env production   --body "$(OUT deployClientId)"
 gh variable set AZURE_CLIENT_ID --repo $REPO --env market-hours  --body "$(OUT scheduleClientId)"
 ```

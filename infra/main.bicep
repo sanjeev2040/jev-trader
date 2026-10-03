@@ -67,11 +67,11 @@ param budgetStartDate string = '2026-10-01'
 @description('Optional: your Entra object id. When set you get Key Vault Secrets Officer, so you can enter the secret values.')
 param operatorObjectId string = ''
 
-// Built-in role definition ids.
+// Built-in role definition ids (verified with 'az role definition list').
 var roles = {
   acrPull: '7f951dda-4ed3-4680-a7ca-43fe172d538d'
   acrPush: '8311e382-0749-4cb8-b61a-304f252e45ec'
-  keyVaultSecretsUser: '4633458b-17de-408a-b874-0521c4a2b1c3'
+  keyVaultSecretsUser: '4633458b-17de-408a-b874-0445c86b69e6'
   keyVaultSecretsOfficer: 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7'
   storageBlobDataContributor: 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
   tagContributor: '4a9ae827-6dc8-4573-8ac7-8239d42aa03f'
