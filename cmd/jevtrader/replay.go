@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -26,6 +27,7 @@ import (
 	"github.com/sanjeev2040/jev-trader/internal/risk"
 	"github.com/sanjeev2040/jev-trader/internal/snapshot"
 	"github.com/sanjeev2040/jev-trader/internal/store"
+	"github.com/sanjeev2040/jev-trader/internal/watchlist"
 )
 
 // defaultDecisionLog is where run and replay keep the decision log.
@@ -54,6 +56,7 @@ func replayCmd(ctx context.Context, args []string, e env) error {
 	from := fs.String("from", "", "first IST day to replay, YYYY-MM-DD (default: from the start of the data)")
 	to := fs.String("to", "", "last IST day to replay, YYYY-MM-DD (default: to the end of the data)")
 	tokens := fs.String("tokens", "", "comma-separated Kite instrument tokens to replay (default: all)")
+	watchlistFile := fs.String("watchlist-file", "", "replay only the instruments of this watchlist file written by `jevtrader screen`, found in the stored data by symbol (the index stays as context); not with --tokens")
 	indexKey := fs.String("index", "NSE:NIFTY 50", `index used as snapshot context and never traded, found by EXCHANGE:SYMBOL in the stored data, or given as an instrument token (NIFTY 50 is 256265); "" for none`)
 	start := fs.String("start", "", "first IST time of day to trade, HH:MM; earlier bars of the day still warm the indicators up but are not decided on (default: the session open)")
 	end := fs.String("end", "", "IST time of day to stop at, HH:MM; later data is not traded, only used for the comparison (default: the close of the data)")
@@ -89,6 +92,14 @@ func replayCmd(ctx context.Context, args []string, e env) error {
 	cfg, err := parseSource(*dataDir, *source, *from, *to, *tokens)
 	if err != nil {
 		return usageError{err}
+	}
+	if *watchlistFile != "" {
+		if *tokens != "" {
+			return usageError{errors.New("--watchlist-file and --tokens both choose the instruments; give one")}
+		}
+		if err := applyWatchlistFile(&cfg, *watchlistFile, e.stderr); err != nil {
+			return err
+		}
 	}
 	indexToken, err := resolveIndex(&cfg, *indexKey)
 	if err != nil {
@@ -267,6 +278,78 @@ func parseLookahead(list string) ([]time.Duration, error) {
 }
 
 var errIndexFound = errors.New("index found")
+
+var errAllFound = errors.New("all instruments found")
+
+// applyWatchlistFile limits the replay to the instruments of a watchlist file.
+// The file names instruments by EXCHANGE:SYMBOL and the stored data by token,
+// so it looks the symbols up in the data it is about to replay; one that is
+// not stored is reported and skipped, and none stored at all is an error.
+func applyWatchlistFile(cfg *mdreplay.Config, path string, warn io.Writer) error {
+	f, err := watchlist.Read(path)
+	if err != nil {
+		return usageError{err}
+	}
+	day, _ := time.ParseInLocation(time.DateOnly, f.Date, ist)
+	if (!cfg.From.IsZero() && day.Before(cfg.From)) || (!cfg.To.IsZero() && !day.Before(cfg.To)) {
+		fmt.Fprintf(warn, "jevtrader replay: %s is the watchlist for %s, which is outside the replayed days\n", path, f.Date)
+	}
+	found, err := findTokens(*cfg, f.Keys())
+	if err != nil {
+		return err
+	}
+	var missing []string
+	for _, key := range f.Keys() {
+		if token, ok := found[key]; ok {
+			cfg.Tokens = append(cfg.Tokens, token)
+		} else {
+			missing = append(missing, key)
+		}
+	}
+	if len(cfg.Tokens) == 0 {
+		return fmt.Errorf("none of the %d instruments of %s is in the stored data (backfill with --symbols so the bars carry their symbol)", len(f.Entries), path)
+	}
+	if len(missing) > 0 {
+		fmt.Fprintf(warn, "jevtrader replay: %d of the watchlist's instruments are not in the stored data and are skipped: %s\n", len(missing), strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// findTokens scans the stored data for the tokens of the EXCHANGE:SYMBOL keys,
+// stopping once all are found.
+func findTokens(cfg mdreplay.Config, keys []string) (map[string]uint32, error) {
+	want := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		want[k] = true
+	}
+	found := map[string]uint32{}
+	see := func(token uint32, key string) error {
+		if want[key] {
+			found[key] = token
+			if len(found) == len(want) {
+				return errAllFound
+			}
+		}
+		return nil
+	}
+	q := store.Query{From: cfg.From, To: cfg.To}
+	var err error
+	if cfg.Kind == mdreplay.Ticks {
+		err = store.ScanTicks(cfg.Root, q, func(t domain.Tick) error { return see(t.InstrumentToken, t.Symbol) })
+	} else {
+		interval := cfg.BarInterval
+		if interval == 0 {
+			interval = time.Minute
+		}
+		err = store.ScanBars(cfg.Root, string(cfg.Kind), store.BarQuery{Query: q, Interval: interval}, func(b domain.Bar) error {
+			return see(b.Instrument.Token, b.Instrument.Exchange+":"+b.Instrument.Symbol)
+		})
+	}
+	if err != nil && !errors.Is(err, errAllFound) {
+		return nil, fmt.Errorf("looking up the watchlist in the stored data: %w", err)
+	}
+	return found, nil
+}
 
 // resolveIndex finds the index token in the stored data by its
 // EXCHANGE:SYMBOL key, and makes sure a token filter still lets the index

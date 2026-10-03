@@ -3,6 +3,8 @@
 Both subcommands build the same engine (`internal/engine`) from different
 edges, as described in [reports/0002-architecture.md](../reports/0002-architecture.md).
 
+`jevtrader screen` runs before either: it writes the day's [watchlist file](#jevtrader-screen) that `run` and `replay` can read.
+
 | | `run` | `replay` |
 | --- | --- | --- |
 | Market data | Kite ticker | stored ticks, bars or backfilled bars |
@@ -10,12 +12,34 @@ edges, as described in [reports/0002-architecture.md](../reports/0002-architectu
 | Decider | Jev | `hold`, `momentum`, `jev`, `recorded:<run-id>` |
 | Broker | paper | paper |
 
+## `jevtrader screen`
+
+```
+jevtrader login
+jevtrader screen                       # before 09:08 IST: the early pass; from 09:08: the final pass
+jevtrader screen --date 2026-10-01     # rebuild a past day's list
+```
+
+Builds the day's watchlist and writes `state/watchlist/YYYY-MM-DD.json` (`--out-dir`). The design, every source and its limits are in [reports/0004-watchlist.md](../reports/0004-watchlist.md). In short:
+
+1. **Universe**: NIFTY Midcap 150 and Smallcap 250 constituents (NSE's public index CSVs, cached per day under `--data-dir`), less NIFTY 50 and NIFTY Next 50, less stocks not in the `EQ` series or on NSE's ASM/GSM lists.
+2. **Liquidity** (Kite daily candles): previous-day traded value ≥ ₹10 crore (`--min-value-cr`), average volume ≥ 200,000 (`--min-adv`), previous close ₹50–₹5,000 (`--min-price`, `--max-price`).
+3. **Signals**: *news* from the last 18 hours (`--news-window`) — NSE corporate announcements and five business-news RSS feeds (`--news-sources`) — mapped to the screened companies and scored by Jev with three typed questions (expected impact: Score; material and price-moving: Noul; direction: Choice); *sector* strength from the previous session and, in the final pass, the pre-open; the pre-open *gap*; recent *range*. Combined with the weights `--w-news 0.4 --w-sector 0.25 --w-gap 0.25 --w-range 0.1`; a signal that is unavailable this run is left out rather than counted as zero.
+4. **Output**: the top `--top` (8), at most `--max-per-sector` (3) from one sector, each with its score, signals, plain-text reasons and the news behind it. The summary also prints on stdout.
+
+`--phase` is `auto` by default: *early* before 09:08 IST (news and the previous session), *final* from 09:08 (adds the pre-open gap and sectoral indices), *historic* for a past `--date` (no pre-open exists; RSS feeds keep no history, so only NSE filings supply news). An early pass does not replace a final file unless `--force`. Daily candles and Jev's news scores are cached for the day, so the second pass is short.
+
+It needs a Kite session (`jevtrader login`) and reads `KITE_API_KEY` and `JEV_API_KEY` from the environment or from the Key Vault named by `JEVTRADER_KEYVAULT`. Without `JEV_API_KEY` the news is fetched but not scored (a warning says so). The command makes about 390 Kite day-candle requests (rate limited to 3 a second) on the first pass of the day and the Jev calls cost cents a month.
+
 ## `jevtrader run`
 
 ```
 jevtrader login
 jevtrader run --watchlist NSE:INFY,NSE:TCS
+jevtrader run --watchlist-file state/watchlist/2026-10-05.json --watchlist NSE:INFY,NSE:TCS
 ```
+
+`--watchlist-file` trades the instruments `screen` wrote, but only if the file is for today's IST date; if it is missing, stale or unreadable, `run` logs why and trades `--watchlist` instead. With neither a usable file nor `--watchlist`, `run` refuses to start.
 
 Paper trading on live data. The Jev decider uses the pinned model `jev-1.13.0` unless `--model` names another explicit id (`jev-latest` is rejected). It verifies the saved Kite session, resolves the
 watchlist (and the `NSE:NIFTY 50` index, used only as snapshot context),
@@ -67,6 +91,7 @@ Flags for a session on one past day, used in the runbook below:
 | `--compare` | add the comparison with what the market then did; also replays the `hold` and `momentum` baselines if they are not in `--deciders` |
 | `--lookahead 5m,15m,30m` | with `--compare`, how long after each BUY/SELL to read the price |
 | `--index <token>` | name the index by instrument token (NIFTY 50 is `256265`) when the stored bars have no symbol |
+| `--watchlist-file <file>` | replay only the instruments of a watchlist file written by `screen` (found in the stored data by symbol; the index stays as context; not with `--tokens`) |
 
 Without these flags the output is exactly what it was before.
 
@@ -177,3 +202,18 @@ Tables: `runs`, `cycles` (snapshot, answer, risk verdict, intent; written
 before the order is submitted), `order_events` (one per broker update) and
 `equity`. Open it with any SQLite client; WAL mode allows reading while a run
 is writing.
+
+## Runbook: screen, then paper-trade the screened list locally
+
+1. `export JEVTRADER_KEYVAULT=kv-jev-wpvd3louqq` and `./jevtrader login` as above.
+2. Before the open, `./jevtrader screen` (at about 08:30 IST it is the early pass; run it again after 09:08 for the final pass with the pre-open gap). Read the summary: each entry lists why it is there.
+3. `./jevtrader run --watchlist-file state/watchlist/$(TZ=Asia/Kolkata date +%F).json --watchlist NSE:INFY,NSE:TCS` — the second list is the fallback.
+
+To see what the screen would have picked on a past day and how that day went (RSS history does not exist, so the news signal then rests on NSE filings alone):
+
+```sh
+./jevtrader screen --date 2026-10-01
+./jevtrader backfill --symbols "$(jq -r '[.entries[].key] | join(",")' state/watchlist/2026-10-01.json),NSE:NIFTY 50" --from 2026-10-01 --derive ""
+./jevtrader replay --source backfill --from 2026-10-01 --to 2026-10-01 --start 09:15 --end 10:15 \
+  --watchlist-file state/watchlist/2026-10-01.json --deciders jev --compare --out replay-screened-2026-10-01.txt
+```

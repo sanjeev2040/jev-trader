@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"github.com/sanjeev2040/jev-trader/internal/risk"
 	"github.com/sanjeev2040/jev-trader/internal/snapshot"
 	"github.com/sanjeev2040/jev-trader/internal/store"
+	"github.com/sanjeev2040/jev-trader/internal/watchlist"
 )
 
 const modePaper = "paper"
@@ -52,7 +54,8 @@ func trade(ctx context.Context, args []string, e env) error {
 	fs.SetOutput(e.stderr)
 	mode := fs.String("mode", modePaper, "paper (simulated fills on live data) or live (gated off; refuses to start)")
 	liveEnabled := fs.Bool("live-enabled", false, "live.enabled: one of the two switches live trading needs besides --mode=live (it is also gated off in code)")
-	watchlist := fs.String("watchlist", "", `comma-separated instruments, e.g. "NSE:INFY,NSE:TCS" (exact EXCHANGE:SYMBOL keys; required)`)
+	watchlist := fs.String("watchlist", "", `comma-separated instruments, e.g. "NSE:INFY,NSE:TCS" (exact EXCHANGE:SYMBOL keys; required unless --watchlist-file is given, and the fallback when that file is missing or stale)`)
+	watchlistFile := fs.String("watchlist-file", "", "today's watchlist file written by `jevtrader screen` (e.g. state/watchlist/2026-10-05.json); used instead of --watchlist when it exists and is for today's IST date")
 	indexKey := fs.String("index", "NSE:NIFTY 50", `index used as snapshot context and never traded; "" for none`)
 	model := fs.String("model", jev.DefaultModel, "pinned Jev model id (\"jev-latest\" is rejected)")
 	jevURL := fs.String("jev-url", "", "Jev base URL (default: the public API)")
@@ -63,7 +66,7 @@ func trade(ctx context.Context, args []string, e env) error {
 	record := fs.Bool("record", true, "also record ticks and closed bars under --data-dir")
 	buffer := fs.Int("buffer", 8192, "market-data channel capacity")
 	fs.Usage = func() {
-		fmt.Fprintln(e.stderr, "usage: jevtrader run --watchlist NSE:INFY,NSE:TCS [flags]\n\nTrades on live Kite data with Jev decisions, the risk gate and the paper broker.\nRun `jevtrader login` first. Reads KITE_API_KEY, KITE_API_SECRET and JEV_API_KEY from the environment, or from the\nAzure Key Vault named by JEVTRADER_KEYVAULT.\n\nflags:")
+		fmt.Fprintln(e.stderr, "usage: jevtrader run (--watchlist NSE:INFY,NSE:TCS | --watchlist-file state/watchlist/YYYY-MM-DD.json) [flags]\n\nTrades on live Kite data with Jev decisions, the risk gate and the paper broker.\nRun `jevtrader login` first. Reads KITE_API_KEY, KITE_API_SECRET and JEV_API_KEY from the environment, or from the\nAzure Key Vault named by JEVTRADER_KEYVAULT.\n\nflags:")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -78,12 +81,17 @@ func trade(ctx context.Context, args []string, e env) error {
 	if err := liveGate(*mode, *liveEnabled); err != nil {
 		return err
 	}
-	symbols := splitList(*watchlist)
+	static := splitList(*watchlist)
 	switch {
-	case len(symbols) == 0:
-		return usageError{errors.New("--watchlist is required")}
+	case len(static) == 0 && *watchlistFile == "":
+		return usageError{errors.New("--watchlist or --watchlist-file is required")}
 	case *buffer < 1:
 		return usageError{errors.New("--buffer must be positive")}
+	}
+	logger := slog.New(slog.NewTextHandler(e.stderr, nil))
+	symbols, err := resolveWatchlist(static, *watchlistFile, time.Now(), logger)
+	if err != nil {
+		return err
 	}
 
 	secrets, err := loadSecrets(ctx, e, config.EnvKiteAPIKey, config.EnvKiteAPISecret, config.EnvJevAPIKey)
@@ -131,7 +139,6 @@ func trade(ctx context.Context, args []string, e env) error {
 	if *indexKey != "" {
 		indexToken = instruments[len(instruments)-1].Token
 	}
-	logger := slog.New(slog.NewTextHandler(e.stderr, nil))
 	src, err := kite.New(kite.Config{APIKey: apiKey, Tokens: tokens, Instruments: instruments, Logger: logger})
 	if err != nil {
 		return err
@@ -144,6 +151,28 @@ func trade(ctx context.Context, args []string, e env) error {
 		indexToken: indexToken, record: *record, buffer: *buffer, decideTimeout: *decideTimeout,
 		limits: risk.DefaultLimits(), clock: clock.Wall{}, logger: logger,
 	})
+}
+
+// resolveWatchlist returns the instruments to trade: the watchlist file's, if
+// there is one for today, otherwise the static list. A file that is missing,
+// stale (another IST day) or unreadable is not an error while a static list
+// exists: the session trades the static list and says why. With no static list
+// to fall back on it is.
+func resolveWatchlist(static []string, path string, now time.Time, logger *slog.Logger) ([]string, error) {
+	if path == "" {
+		return static, nil
+	}
+	f, err := watchlist.Load(path, now)
+	if err == nil {
+		logger.Info("watchlist from file", "path", path, "date", f.Date, "phase", f.Phase, "final", f.Final,
+			"generated_at", f.GeneratedAt.Format(time.RFC3339), "instruments", strings.Join(f.Keys(), ","))
+		return f.Keys(), nil
+	}
+	if len(static) == 0 {
+		return nil, fmt.Errorf("watchlist file: %w (and no --watchlist to fall back on)", err)
+	}
+	logger.Warn("watchlist file not used; trading the static --watchlist", "path", path, "reason", err.Error(), "instruments", strings.Join(static, ","))
+	return static, nil
 }
 
 // liveGate keeps run from ever placing a real order. Paper passes. Live asks

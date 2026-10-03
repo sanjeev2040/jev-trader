@@ -16,9 +16,15 @@ param githubRepo = 'sanjeev2040/jev-trader'
 param githubOwnerId = '22476366'
 param githubRepoId = '1401087829'
 
-// Instruments to paper-trade and the pinned Jev model id.
+// The pinned Jev model id, and the instruments to paper-trade. With screening on
+// (the default) the VM builds each day's list of mid and small caps before the
+// open and `watchlist` is only the fallback, used when the screen produced no
+// usable file.
 param watchlist = 'NSE:INFY,NSE:TCS'
 param jevModel = 'jev-1.13.0'
+param screenEnabled = true
+// Extra flags for `jevtrader screen`, for example '--top 6 --w-news 0.5'.
+param screenArgs = ''
 
 param alertEmail = 'REPLACE_ME@example.com'
 param budgetAmount = 25
