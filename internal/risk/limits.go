@@ -74,6 +74,30 @@ type Limits struct {
 	RotationMargin  float64
 	RotationMinHold time.Duration
 
+	// MinHold is how long a position must have been held before a decider's
+	// exit is allowed; until then the gate refuses it (ReasonMinHold). It
+	// never delays a risk-driven exit: the square-off, the daily loss limit
+	// and the kill switch flatten the book at once. A position the book has no
+	// entry time for, such as one restored from the journal, is not held back.
+	// Zero turns the check off.
+	MinHold time.Duration
+	// ReentryCooldown is how long after the bot sells out of an instrument
+	// (an exit, a risk exit or a rotation) before it may open a new position
+	// in it again (ReasonCooldown). Zero turns the check off.
+	ReentryCooldown time.Duration
+
+	// CostAware turns on the cost-aware entry check: an entry is refused
+	// unless the expected move beats the round-trip costs plus a margin
+	// (ReasonCostEdge). The expected move, in rupees a share, is
+	// (2p - 1) x the instrument's price range over RangeWindow, where p is the
+	// decision's probability: a coin flip expects nothing and a certain call
+	// captures the whole recent range. The costs are CostReserveRate of the
+	// price and the margin is CostMargin of the price. The check does not run
+	// for an instrument the book has no price history for.
+	CostAware   bool
+	CostMargin  float64
+	RangeWindow time.Duration
+
 	// MaxDailyLoss halts new entries and flattens the book once the day's
 	// realized plus unrealized PnL reaches -MaxDailyLoss.
 	MaxDailyLoss float64
@@ -114,6 +138,11 @@ func DefaultLimits() Limits {
 		MaxGrossNotional:         200_000,
 		RotationMargin:           0.10,
 		RotationMinHold:          5 * time.Minute,
+		MinHold:                  5 * time.Minute,
+		ReentryCooldown:          10 * time.Minute,
+		CostAware:                true,
+		CostMargin:               0.0005,
+		RangeWindow:              30 * time.Minute,
 		MaxDailyLoss:             5_000,
 		MaxOrdersPerSecond:       3,
 		MaxOrdersPerMinute:       60,
@@ -187,6 +216,15 @@ func (l Limits) Validate() error {
 	}
 	if !(l.RotationMargin >= 0 && l.RotationMargin < 1) || l.RotationMinHold < 0 {
 		bad("rotation margin must be in [0, 1) and the minimum hold not negative, got %v and %s", l.RotationMargin, l.RotationMinHold)
+	}
+	if l.MinHold < 0 || l.ReentryCooldown < 0 {
+		bad("minimum hold and re-entry cooldown must not be negative, got %s and %s", l.MinHold, l.ReentryCooldown)
+	}
+	if !(l.CostMargin >= 0 && l.CostMargin < 0.1) {
+		bad("cost margin must be in [0, 0.1), got %v", l.CostMargin)
+	}
+	if l.CostAware && !(l.RangeWindow > 0 && l.RangeWindow <= rangeKeep) {
+		bad("range window must be in (0, %s] when the cost-aware check is on, got %s", rangeKeep, l.RangeWindow)
 	}
 	positive("max position notional", l.MaxPositionNotional)
 	positive("max gross notional", l.MaxGrossNotional)

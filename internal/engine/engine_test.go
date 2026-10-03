@@ -78,9 +78,11 @@ type rig struct {
 }
 
 // testLimits are the default limits with a 200,000 budget, so a size-S entry is
-// 10,000 and the engine tests trade a few shares of a stock near 1,500.
+// 10,000 and the engine tests trade a few shares of a stock near 1,500. The
+// churn checks are off: these tests trade minutes apart on purpose.
 func testLimits() risk.Limits {
 	l := risk.DefaultLimits()
+	l.MinHold, l.ReentryCooldown, l.CostAware = 0, 0, false
 	l.CapitalBudget = 200_000
 	l.SizeFraction[domain.SizeS] = 0.05
 	return l
@@ -158,6 +160,33 @@ func countVerdict(cs []decisionlog.Cycle, verdict string) int {
 		}
 	}
 	return n
+}
+
+func TestCostAwareEntryReadsTheRangeTheEngineMarks(t *testing.T) {
+	r := newRig(t, scenarioTicks(infy, 1), momentum(t))
+	r.cfg.Gate = mustGate(t, func(l *risk.Limits) {
+		l.CapitalBudget = 200_000
+		l.SizeFraction[domain.SizeS] = 0.05
+		l.CostAware = true
+		l.CostMargin = 0.09 // the tape's ~28-rupee range cannot pay a 9% margin
+	})
+	r.run(t)
+	cs := cyclesOf(t, r.log, "run1")
+	if n := countVerdict(cs, string(risk.ReasonApproved)); n != 0 {
+		t.Errorf("approved cycles = %d, want none", n)
+	}
+	var seen bool
+	for _, c := range cs {
+		if c.Verdict == string(risk.ReasonCostEdge) {
+			seen = true
+			if !strings.Contains(c.VerdictDetail, "expected move") {
+				t.Errorf("detail %q does not show the expected move", c.VerdictDetail)
+			}
+		}
+	}
+	if !seen {
+		t.Error("expected a cost_edge refusal in the decision log")
+	}
 }
 
 func TestMomentumRunLogsEveryCycleAndTradesOnce(t *testing.T) {

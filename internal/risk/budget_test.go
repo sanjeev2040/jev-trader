@@ -13,6 +13,7 @@ import (
 func budgetGate(t *testing.T, edit func(*Limits)) *Gate {
 	t.Helper()
 	l := DefaultLimits()
+	l.MinHold, l.ReentryCooldown, l.CostAware = 0, 0, false // the budget tests trade freely; churn_test.go covers these
 	if edit != nil {
 		edit(&l)
 	}
