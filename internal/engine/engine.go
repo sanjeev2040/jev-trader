@@ -11,8 +11,8 @@
 // For every closed bar of a watched instrument the engine builds a snapshot,
 // asks the decider, has the risk gate judge the answer, writes the cycle to
 // the decision log, and only then submits an approved order. Risk-driven exits
-// (square-off, loss limit, kill switch) do not wait for the decider and are
-// logged as cycles of their own.
+// (square-off, loss limit, kill switch, per-position stop and time exit) do
+// not wait for the decider and are logged as cycles of their own.
 package engine
 
 import (

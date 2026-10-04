@@ -95,8 +95,10 @@ func (e *Engine) logUpdate(ctx context.Context, o orders.Order, u domain.OrderUp
 }
 
 // exits asks the risk gate for the exits due at now, cancels the entries it
-// names and submits the flattening orders. They do not wait for the decider
-// and each is logged as a cycle of its own.
+// names and submits the flattening orders: the whole book at the square-off,
+// the loss limit and the kill switch, one position at a time for a stop or a
+// time exit. They do not wait for the decider and each is logged as a cycle
+// of its own.
 func (e *Engine) exits(ctx context.Context, now time.Time) error {
 	plan := e.gate.Exits(e.book, now)
 	if plan.Reason == "" {
@@ -118,7 +120,7 @@ func (e *Engine) exits(ctx context.Context, now time.Time) error {
 		row := decisionlog.Cycle{
 			CycleID: in.CycleID, RunID: e.cfg.RunID, Source: decisionlog.SourceRisk, Mode: e.cfg.Mode,
 			Instrument: in.Instrument, Alias: e.aliases.Alias(in.Instrument), BarClose: now, Price: in.RefPrice, AppliedAt: now,
-			ExitReason: string(a.Reason()), Verdict: string(a.Reason()),
+			ExitReason: string(a.Reason()), Verdict: string(a.Reason()), VerdictDetail: a.Detail(),
 			Intent: &in, ClientID: orders.ClientID(in.CycleID),
 		}
 		if err := e.cfg.Log.AppendCycle(ctx, row); err != nil {

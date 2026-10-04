@@ -12,7 +12,7 @@ type Source string
 // Sources of an approved order.
 const (
 	SourceDecision Source = "jev"  // a decider's answer the gate approved
-	SourceRisk     Source = "risk" // a risk-driven exit: square-off, loss limit or kill switch
+	SourceRisk     Source = "risk" // a risk-driven exit: square-off, loss limit, kill switch, stop or time exit
 	// SourceRotation is the sale of one of the bot's own positions to free
 	// capital for a stronger entry.
 	SourceRotation Source = "rotation"
@@ -31,11 +31,29 @@ type approval struct {
 	intent domain.OrderIntent
 	source Source
 	reason Reason
+	detail string
 	at     time.Time
 }
 
 func newApproval(intent domain.OrderIntent, source Source, reason Reason, at time.Time) Approval {
 	return Approval{&approval{intent: intent, source: source, reason: reason, at: at}}
+}
+
+// withDetail returns a with the human-readable context for the decision log.
+func (a Approval) withDetail(detail string) Approval {
+	if a.a != nil {
+		a.a.detail = detail
+	}
+	return a
+}
+
+// Detail returns the numbers behind a risk-driven exit, such as the stop level
+// a price went through. It is empty when there are none.
+func (a Approval) Detail() string {
+	if a.a == nil {
+		return ""
+	}
+	return a.a.detail
 }
 
 // Valid reports whether the gate minted a.

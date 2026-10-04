@@ -32,7 +32,10 @@ func TestTradingRulesDefaultToTradingForHours(t *testing.T) {
 	if r.decideEvery != engine.DefaultDecideEvery || engine.DefaultDecideEvery != 5*time.Minute {
 		t.Errorf("decision cadence %s, want 5m", r.decideEvery)
 	}
-	for _, want := range []string{"decide every 5m0s", "p >= 0.70 on 2 consecutive decisions", "min hold 1h0m0s", "re-entry cooldown 1h0m0s"} {
+	if l.StopLossPct != 0.02 || l.StopRangeMult != 0 || l.MaxHold != 0 {
+		t.Errorf("stop %v, range multiple %v, max hold %s; want a 2%% stop and no time exit", l.StopLossPct, l.StopRangeMult, l.MaxHold)
+	}
+	for _, want := range []string{"decide every 5m0s", "p >= 0.70 on 2 consecutive decisions", "min hold 1h0m0s", "re-entry cooldown 1h0m0s", "stop 2%; no time exit"} {
 		if !strings.Contains(r.String(), want) {
 			t.Errorf("rules %q lack %q", r, want)
 		}
@@ -60,6 +63,33 @@ func TestTradingRuleFlagsOverrideTheDefaults(t *testing.T) {
 	}
 }
 
+func TestStopAndTimeExitFlags(t *testing.T) {
+	r, err := parseRules(t, "--stop-pct", "1.5", "--stop-range-mult", "2", "--max-hold", "3h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := tradingLimits(config.Capital{Amount: 25_000}, r)
+	if l.StopLossPct != 0.015 || l.StopRangeMult != 2 || l.MaxHold != 3*time.Hour || l.Validate() != nil {
+		t.Errorf("limits %+v", l)
+	}
+	for _, want := range []string{"stop at the larger of 1.5% and 2 x the 30m range", "time exit after 3h0m0s"} {
+		if !strings.Contains(r.String(), want) {
+			t.Errorf("rules %q lack %q", r, want)
+		}
+	}
+	off, err := parseRules(t, "--stop-pct", "0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l := tradingLimits(config.Capital{Amount: 25_000}, off); l.StopLossPct != 0 || l.Validate() != nil || !strings.Contains(off.String(), "no stop; no time exit") {
+		t.Errorf("stop off: %+v, rules %q", l, off)
+	}
+	// The studies cache by the rules' text, so a different stop must read differently.
+	if r.String() == defaultRules(t).String() {
+		t.Error("a changed stop left the rules text, and so the study's cache key, the same")
+	}
+}
+
 func TestTradingRuleFlagsAreValidated(t *testing.T) {
 	for name, args := range map[string][]string{
 		"negative hold":     {"--min-hold", "-1m"},
@@ -67,6 +97,10 @@ func TestTradingRuleFlagsAreValidated(t *testing.T) {
 		"probability high":  {"--entry-min-probability", "1.5"},
 		"probability low":   {"--entry-min-probability", "-0.1"},
 		"negative calls":    {"--entry-confirmations", "-1"},
+		"negative stop":     {"--stop-pct", "-1"},
+		"stop of 100":       {"--stop-pct", "100"},
+		"negative range":    {"--stop-range-mult", "-2"},
+		"negative max hold": {"--max-hold", "-1h"},
 		"cadence zero":      {"--decide-every", "0"},
 		"cadence seconds":   {"--decide-every", "90s"},
 		"cadence off grid":  {"--decide-every", "7m"},
