@@ -19,6 +19,11 @@ type DayResult struct {
 	// Stocks is every studied stock of the day, picked or random, with the
 	// signals the screen gave it and what it did over the window.
 	Stocks []StockDay `json:"stocks,omitempty"`
+	// Pool is the rest of the screened pool, measured (not traded) when the
+	// study covers the whole pool: what each stock did over the window, so the
+	// market-neutral benchmark is the pool's cross-section and the news signal
+	// is read on every stock with a scored item, not only the picks.
+	Pool []StockDay `json:"pool,omitempty"`
 
 	// Jev is what the replays' Jev decider cost; ScreenInputTokens and
 	// ScreenOutputTokens what scoring the day's news cost.
@@ -79,6 +84,8 @@ type StockDay struct {
 	// screen could not read for the stock is absent.
 	Score   float64            `json:"score"`
 	Signals map[string]float64 `json:"signals,omitempty"`
+	// NewsItems is how many news items Jev scored about the stock that morning.
+	NewsItems int `json:"news_items,omitempty"`
 	// ReturnPct is the move from the open of the window's first bar to the
 	// close of its last; DayReturnPct runs to the day's close.
 	ReturnPct    float64  `json:"return_pct"`

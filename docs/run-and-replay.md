@@ -3,6 +3,8 @@
 Both subcommands build the same engine (`internal/engine`) from different
 edges, as described in [reports/0002-architecture.md](../reports/0002-architecture.md).
 
+`jevtrader shadow-report` reads what `run` logged about every signal, traded or not: see [the shadow log](#the-shadow-log-and-jevtrader-shadow-report).
+
 `jevtrader screen` runs before either: it writes the day's [watchlist file](#jevtrader-screen) that `run` and `replay` can read. `jevtrader study` runs screen, backfill and replay over many past days and aggregates them: see [picker-study.md](picker-study.md).
 
 | | `run` | `replay` |
@@ -24,7 +26,7 @@ Builds the day's watchlist and writes `state/watchlist/YYYY-MM-DD.json` (`--out-
 
 1. **Universe**: NIFTY Midcap 150 and Smallcap 250 constituents (NSE's public index CSVs, cached per day under `--data-dir`), less NIFTY 50 and NIFTY Next 50, less stocks not in the `EQ` series or on NSE's ASM/GSM lists.
 2. **Liquidity** (Kite daily candles): previous-day traded value ≥ ₹10 crore (`--min-value-cr`), average volume ≥ 200,000 (`--min-adv`), previous close ₹50–₹5,000 (`--min-price`, `--max-price`).
-3. **Signals**: *news* from the last 18 hours (`--news-window`) — NSE corporate announcements and five business-news RSS feeds (`--news-sources`) — mapped to the screened companies and scored by Jev with three typed questions (expected impact: Score; material and price-moving: Noul; direction: Choice); the pre-open *gap* (final pass); *sector* strength and recent *range*, which the picker study found carry no information or a negative one and so weigh nothing by default. Combined with the weights `--w-news 0.6 --w-sector 0 --w-gap 0.25 --w-range 0` (a negative `--w-range` penalises a wide range); a signal that is unavailable this run is left out rather than counted as zero. A stock is listed only if Jev scored at least one of its news items as a catalyst: material, clearly positive and worth about 1% or more (`--require-catalyst`, `--catalyst-material 0.5`, `--catalyst-direction 0.3`, `--catalyst-impact 1`; `--require-catalyst=false` ranks every screened stock).
+3. **Signals**: *news* from the last 18 hours (`--news-window`) — NSE corporate announcements and five business-news RSS feeds (`--news-sources`) — mapped to the screened companies and scored by Jev with three typed questions (expected impact: Score; material and price-moving: Noul; direction: Choice); the pre-open *gap* (final pass); *sector* strength and recent *range*, which the picker study found carry no information or a negative one and so weigh nothing by default. Combined with the weights `--w-news 0.6 --w-sector 0 --w-gap 0.25 --w-range 0` (a negative `--w-range` penalises a wide range); a signal that is unavailable this run is left out rather than counted as zero. A stock is listed only if Jev scored at least one of its news items as a catalyst: material, clearly positive and worth about 1% or more (`--require-catalyst`, `--catalyst-material 0.5`, `--catalyst-direction 0.3`, `--catalyst-impact 1`; `--require-catalyst=false` ranks every screened stock). `--anonymize-news` is the look-ahead control: the text sent to Jev has the company's name and symbol replaced by "the company", every date replaced by a placeholder and no publication time, so the scores come from the wording alone (see [picker-study.md](picker-study.md#the-look-ahead-control)); the answers are cached apart from the named ones.
 4. **Output**: up to `--top` (50) stocks, so fewer on a quiet day and none on a day with no catalyst (a valid empty list: "No catalysts today", exit 0; `run` then idles). A stock counts as a catalyst only if its net, decayed news signal is positive too. `--direction both` is rejected while the catalyst is required; at most `--max-per-sector` (8) from one sector, ranked by likelihood to rise, each with its score, signals, plain-text reasons and the news behind it. The summary also prints on stdout.
 
 `--phase` is `auto` by default: *early* before 09:08 IST (news and the previous session), *final* from 09:08 (adds the pre-open gap and sectoral indices), *historic* for a past `--date` (no pre-open exists; RSS feeds keep no history, so only NSE filings supply news). An early pass does not replace a final file unless `--force`. Daily candles and Jev's news scores are cached for the day, so the second pass is short.
@@ -47,6 +49,8 @@ Paper trading on live data. The Jev decider uses the pinned model `jev-1.13.0` u
 watchlist (and the `NSE:NIFTY 50` index, used only as snapshot context),
 records ticks and closed bars under `--data-dir`, and writes every decision
 cycle to the SQLite decision log (`--log`, default `state/decisions.db`).
+It also shadow-logs every candidate signal, traded or not (`--shadow`, on by
+default; see [the shadow log](#the-shadow-log-and-jevtrader-shadow-report)).
 Creating a `KILL` file in the state directory, or sending `SIGUSR1`, trips the
 kill switch.
 
@@ -62,13 +66,14 @@ The bot trades with a total rupee budget, **₹25,000** unless configured. It is
 - **Sizing.** An entry is sized from the budget: size bucket S, M or L is 5%, 10% or 20% of it (₹1,250, ₹2,500, ₹5,000 at 25,000), never less than one share, clipped to the capital that is free, and to 20% of the budget in one stock. If not even one share fits, the entry is skipped with `budget_full` and says why in the decision log (`committed 24000.00 of budget 25000.00 ...: one share at 1000.00 does not fit`).
 - **Rotation.** When the budget is full and a BUY arrives that is stronger than a position the bot holds, the gate sells that position to free the capital. Only a position the bot opened today and has held for at least the minimum hold (an hour) can go, only if the BUY's probability beats the probability it was opened at by 0.10, and only the weakest qualifying one, and only if selling it frees enough for one share. The sale is logged as its own cycle (`source risk`, exit reason `rotation`); when it fills, the engine asks the gate again for the BUY (cycle `<id>-rot-buy`, abandoned after 2 minutes), so the capital is never spent twice. Both orders obey the order-rate limits.
 - **Churn.** Four checks keep the bot from trading in and out of a stock for nothing; replays of 2026-10-01 showed RELIANCE round-tripping four times inside a 2-rupee range for -₹249, mostly costs. Each refusal is a gate verdict with its numbers in the decision log and in the replay walkthrough (`gate min_hold (...)`):
-  - **Minimum hold** (`min_hold`, 60 minutes; `--min-hold`). A decider's exit is refused until the position has been held that long, counted from its first entry. The square-off, the daily loss limit and the kill switch are not delayed. A position without an entry time (restored from the journal) is not held back.
+  - **Minimum hold** (`min_hold`, 60 minutes; `--min-hold`). A decider's exit is refused until the position has been held that long, counted from its first entry. The stop, the time exit, the square-off, the daily loss limit and the kill switch are not delayed. A position without an entry time (restored from the journal) is not held back.
   - **Re-entry cooldown** (`reentry_cooldown`, 60 minutes; `--reentry-cooldown`). After the bot sells out of an instrument (a decider exit, a risk exit or a rotation) it may not open a new position in it until the cooldown has passed. Other instruments are not affected.
   - **Cost-aware entry** (`cost_edge`). An entry is refused unless the expected move beats the round-trip costs plus a margin. Expected move = (2p − 1) × the instrument's high-to-low range over the last 30 minutes, where p is the decision's probability; it needs at least costs (the 0.15% `CostReserveRate`) plus a 0.05% margin of the price. At 1,400 that is ₹2.80 a share, so a 2-rupee range is refused at any probability, while a 12-rupee range admits p = 0.8 (7.20). The range comes from the ticks (or bar highs and lows) the engine feeds the book; with no price history yet the check is skipped.
 
   - **Entry bar and confirmation** (`below_probability_threshold`, `entry_unconfirmed`). See [Trading for hours](#trading-for-hours).
+- **Stop and time exit.** Every position has a stop, and may have a time exit (issue #59; both in [Trading for hours](#trading-for-hours)). They are risk exits like the square-off, not decisions: `Gate.Exits` checks every position on every tick or bar and sells the one that has gone through its stop (`stop_loss`) or been held for `--max-hold` (`time_exit`), without asking the decider and whatever the minimum hold, the cooldown or the entry confirmations say. They do not count against the 500-a-day order budget but obey the order-rate limits. The sale starts the re-entry cooldown, and its capital is free for the next entry as soon as it fills (no rotation needed). Rotation never picks a position whose stop is already working. A stop that finds an add-on entry still open cancels it first.
 
-  All of it is in `risk.Limits` (`MinHold`, `ReentryCooldown`, `EntryMinProbability`, `EntryConfirmations`, `CostAware`, `CostMargin`, `RangeWindow`, with `CostReserveRate`); a zero hold or cooldown, or `CostAware = false`, turns a check off.
+  All of it is in `risk.Limits` (`MinHold`, `ReentryCooldown`, `EntryMinProbability`, `EntryConfirmations`, `CostAware`, `CostMargin`, `RangeWindow`, with `CostReserveRate`, and `StopLossPct`, `StopRangeMult`, `MaxHold`); a zero hold, cooldown, stop or time exit, or `CostAware = false`, turns a check off.
 - **Many trades.** Buying and selling the same stock several times a day is allowed across all 50 names, subject to the churn checks above and within the order-rate limits (3 a second, 60 a minute, 500 a day) and the daily loss limit (₹5,000), which still halt new entries.
 - **Holdings it did not open are out of bounds.** The bot never sells, modifies or otherwise touches a holding or position it did not open, such as your existing Zerodha holdings. Every position in its book comes from its own fills; anything else is registered as foreign (`Book.SetForeign`), and the gate refuses every order in it (`foreign_position`), counts nothing of it against the budget and never flattens it. `internal/risk/budget_test.go` and `internal/engine/rotation_test.go` test this as an invariant.
 
@@ -83,10 +88,24 @@ The 2026-09-14 to 2026-10-01 picker study (13 days, 09:15–10:15, ₹25,000) fo
 | `--entry-min-probability` | `0.70` | An entry needs at least this probability, on top of the 0.60 base threshold. Exits keep 0.60, so being choosy about entering never makes a position harder to leave. `0` turns it off. |
 | `--entry-confirmations` | `2` | An entry is acted on only when this many decisions in a row on the instrument chose the same BUY or SELL, each at or above the entry threshold. A HOLD, the other action, a weaker call, an approved entry or a new day starts the count again. `0` or `1` turns it off. |
 | `--decide-every` | `5m` | How often an instrument is put to the decider, aligned to the clock (09:20, 09:25, ...). `1m` decides on every bar. Must be whole minutes that divide 30 (`1m`, `5m`, `15m`, `30m`, ...). |
+| `--stop-pct` | `2` | Per-position stop, in percent of the average price. A long whose last price is this far below its average price is sold at once (a short is bought back this far above), however short its hold and whatever the decider says. `0` turns the fixed stop off. |
+| `--stop-range-mult` | `0` | Widen the stop for a volatile stock: the stop distance becomes the larger of `--stop-pct` and this multiple of the stock's high-to-low range over the last 30 minutes. The distance is read when the position is opened and kept, so a falling price cannot widen its own stop. `0` (the default) uses the percentage alone. |
+| `--max-hold` | `0` | Time exit: a position is sold once it has been held this long, counted from its first entry, whatever the decider says and however short the minimum hold. `0` means no time exit. |
 
-With the defaults an entry needs two strong calls five minutes apart, so the earliest one is 09:25 for the first bar of the day (entries open at 09:20), Jev is asked a fifth as often, and a position is then held at least an hour (to the 15:10 square-off at the latest). What does not change: stops, the square-off at 15:10, the daily loss limit and the kill switch exit at once on every tick, whatever the cadence, hold or cooldown; the capital budget, sizing and the rule that the bot only ever sells positions it opened are unchanged. The `momentum` baseline now reports 0.75 for its calls so it still clears the entry bar and stays a usable benchmark.
+With the defaults an entry needs two strong calls five minutes apart, so the earliest one is 09:25 for the first bar of the day (entries open at 09:20), Jev is asked a fifth as often, and a position is then held at least an hour (to the 15:10 square-off at the latest). What does not change: the stop, the time exit (when set), the square-off at 15:10, the daily loss limit and the kill switch exit at once on every tick, whatever the cadence, hold or cooldown; the capital budget, sizing and the rule that the bot only ever sells positions it opened are unchanged. The `momentum` baseline now reports 0.75 for its calls so it still clears the entry bar and stays a usable benchmark.
 
-To reproduce the old behaviour for a comparison: `--decide-every 1m --entry-confirmations 0 --entry-min-probability 0.6 --min-hold 5m --reentry-cooldown 10m`.
+**The stop.** Before issue #59 the docs said a stop existed and none did, so a position the market turned on stayed held to the 60-minute minimum hold or beyond (the picker study had 6 of 57 positive-news stock-days lose more than 2% over the hour, the worst 5.0%). The stop is placed on the first mark at or through the level: if the price gaps over it, the sale is at the gapped price, not the level, and the paper broker fills it on the next tick like any order. 2% is a first choice, not a tested one; reports/0006 item 6 lists the study that would pick the level (`--stop-pct 0, 1, 1.5, 2, 3`). A stop trades the left tail for some whipsaw and may lower the mean, and it adds a sale and its costs to a position that would have recovered. A position restored from the journal has no entry record, so it gets the percentage stop but no time exit. A holding the bot did not open is never stopped.
+
+In the walkthrough a stop or a time exit is an `EXIT` row, with the numbers in the gate text:
+
+```text
+09:31:30  EXIT   risk: stop_loss @ 1498.00 | gate stop_loss (last price 1498.00 is through the 1499.85 stop, 1.00% from the 1515.00 average price (1.12% adverse); the minimum hold does not apply) | pos +1 @ 1515.00  pnl -17.64
+09:33:00  DECIDE SELL p=0.75 ... | gate reentry_cooldown (sold out of token 1 at 09:31:30, 2m0s ago; re-entry allowed after 10m0s) | pos flat  pnl -19.90
+```
+
+A time exit reads `EXIT   risk: time_exit @ ... | gate time_exit (held 10m0s since the entry at 09:21:30, the maximum is 10m0s; ...)`. The report's `Trading rules:` line says which stop and time exit the run used, and `RiskExits` counts them with the square-off and rotation sales.
+
+To reproduce the old behaviour for a comparison: `--decide-every 1m --entry-confirmations 0 --entry-min-probability 0.6 --min-hold 5m --reentry-cooldown 10m --stop-pct 0`.
 
 ### Where the budget comes from
 
@@ -146,7 +165,7 @@ Flags for a session on one past day, used in the runbook below:
 | `--walkthrough actions\|all` | add each run's chronological walk, instrument by instrument |
 | `--compare` | add the comparison with what the market then did; also replays the `hold` and `momentum` baselines if they are not in `--deciders` |
 | `--lookahead 5m,15m,30m` | with `--compare`, how long after each BUY/SELL to read the price |
-| `--min-hold`, `--reentry-cooldown`, `--entry-min-probability`, `--entry-confirmations`, `--decide-every` | the trading rules; see [Trading for hours](#trading-for-hours) |
+| `--min-hold`, `--reentry-cooldown`, `--entry-min-probability`, `--entry-confirmations`, `--decide-every`, `--stop-pct`, `--stop-range-mult`, `--max-hold` | the trading rules; see [Trading for hours](#trading-for-hours) |
 | `--index <token>` | name the index by instrument token (NIFTY 50 is `256265`) when the stored bars have no symbol |
 | `--watchlist-file <file>` | replay only the instruments of a watchlist file written by `screen` (found in the stored data by symbol; the index stays as context; not with `--tokens`) |
 
@@ -256,9 +275,77 @@ A replay of a past day is an optimistic upper bound: Jev may have seen that peri
 
 `internal/decisionlog` is append-only (triggers reject `UPDATE` and `DELETE`).
 Tables: `runs`, `cycles` (snapshot, answer, risk verdict, intent; written
-before the order is submitted), `order_events` (one per broker update) and
-`equity`. Open it with any SQLite client; WAL mode allows reading while a run
-is writing.
+before the order is submitted), `order_events` (one per broker update),
+`equity`, and the two [shadow tables](#the-shadow-log-and-jevtrader-shadow-report),
+`shadow_signals` and `shadow_outcomes`. Open it with any SQLite client; WAL
+mode allows reading while a run is writing.
+
+The schema version is in `PRAGMA user_version` (now 2). A log written at
+version 1 opens with this binary and is migrated in one transaction: the two
+shadow tables are added and nothing already in it is touched. A binary older
+than the migration refuses a migrated log rather than guess, so roll the log
+back from the Blob Storage backup if the image is rolled back.
+
+## The shadow log and `jevtrader shadow-report`
+
+The capital budget (₹25,000) decides which signals the bot can act on, and it
+cannot resolve an edge of the size at stake in under a year. Per-event returns
+can, so `run` also logs **every candidate signal**, whether or not it was
+traded, and the report reads what the market did after each. Nothing in the
+shadow log can change what is decided or ordered: it only writes, a failed
+write is logged and counted (`ShadowErrors` in the engine's stats) and the run
+goes on, and `replay` and `study` do not write it.
+
+What is logged, in `shadow_signals`:
+
+| Signal | When | Fields |
+| --- | --- | --- |
+| `pick` | the first decision bar of the day, once per picker entry in the watchlist file | rank, score, the screen's signals and the most material news item's Jev scores (impact, material, direction), as JSON in `detail`; counts from the first moment the gate allows an entry (09:20 by default) |
+| `decision:BUY`, `decision:SELL`, `decision:HOLD` | every decider answer, beside its `cycles` row | the answer's probability, the risk gate's verdict and detail (`approved`, `below_threshold`, `short_not_allowed`, ...) and whether an order was approved (`traded`) |
+| `decision:FAILED` | a decider error or timeout, which becomes a HOLD | as above; it is not an answer, so it has its own label |
+
+Each signal carries its time, the price when known, the end of the trading
+window (where entries stop, 15:00 by default) and the index the run watched. A
+signal for the same day, kind, instrument and time is logged once, so a restart
+the same day does not repeat the picks.
+
+**Outcomes** are one `shadow_outcomes` row per signal and horizon, appended
+later from the recorded bars (`--data-dir`, live `bars` first, then
+`bars_backfill`): the stock's move from the signal's price to the close of the
+last bar at or before **+15 minutes, +60 minutes, the window end and the day
+close (15:30)**, with the index's move and the mean move of the day's screened
+universe over the same interval. A horizon past the day's close, or a window end
+that is not after the signal, does not apply. An illiquid stock keeps its last
+price until the target. A horizon the recorded bars do not reach yet is left
+for a later fill, so a backfill of a gap completes it.
+
+```
+jevtrader shadow-report --from 2026-10-05 --to 2026-10-30
+jevtrader shadow-report --from 2026-10-05 --to 2026-10-30 --benchmark universe --by-verdict --json
+```
+
+The command first writes the outcomes the bars now answer (`--fill=false` to
+only read), then prints, per signal and horizon:
+
+- **N** and **DAYS**: outcomes and the distinct trading days among them.
+- **MEAN %**: the mean **market-neutral** return in the direction the signal bet on, in percent: the stock's move minus the benchmark's, times +1 for a pick, a BUY and a HOLD (read as a rise) and −1 for a SELL. Positive means the signal was right on average.
+- **CI95 %**: the 95% interval from resampling **whole days** with replacement (2,000 resamples, `--resamples`, repeatable with `--seed`). Outcomes of one day share that day's market, so the day is the unit; with fewer than two days there is no interval.
+- **HIT %**: the share of outcomes above zero.
+
+Each decision signal is also split into `traded` and `not traded`
+(`--by-verdict` adds one row per gate verdict), and the header counts the
+outcomes still awaiting bars and those left out for want of a benchmark.
+
+`--benchmark` picks what a return is netted against:
+
+- `index` (default): the index the run watched over the same interval, `NSE:NIFTY 50` unless `run --index` says otherwise. Midcap 150 and Smallcap 250, which are what the picks come from, are not streamed by `run`, so they are not available.
+- `universe`: the mean move of every stock the day's signals were about, as recorded. This is the picker's own cross-section, so over all of a day's picks it is zero by construction; it separates signals from each other (a BUY from a HOLD), not from the picker's list.
+- `none`: the raw move.
+
+Run it weekly over the forward days only, and set it beside the historical
+result of `jevtrader study`. The VM stores the log and the bars, so any
+machine with a copy of both can run it.
+
 
 ## Runbook: screen, then paper-trade the screened list locally
 

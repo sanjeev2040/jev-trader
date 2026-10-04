@@ -25,14 +25,15 @@ type env struct {
 }
 
 var commands = map[string]command{
-	"backfill": {summary: "fetch historical 1m candles from Kite and store them as bars", run: runBackfill},
-	"login":    {summary: "daily Kite Connect login; saves the access token", run: runLogin},
-	"record":   {summary: "ingest Kite ticks and persist them to Parquet (no trading)", run: runRecord},
-	"replay":   {summary: "replay stored data through the trading engine and report against baselines", run: runReplay},
-	"run":      {summary: "trade in paper mode on live Kite data (--mode=live is gated off)", run: runTrade},
-	"study":    {summary: "backtest the pre-market picker over many days against buy-and-hold and a random list", run: runStudy},
-	"screen":   {summary: "pick the day's mid and small-cap watchlist from news, sector strength and the pre-open", run: runScreen},
-	"version":  {summary: "print the build version (the git SHA stamped into the image)", run: runVersion},
+	"backfill":      {summary: "fetch historical 1m candles from Kite and store them as bars", run: runBackfill},
+	"login":         {summary: "daily Kite Connect login; saves the access token", run: runLogin},
+	"record":        {summary: "ingest Kite ticks and persist them to Parquet (no trading)", run: runRecord},
+	"replay":        {summary: "replay stored data through the trading engine and report against baselines", run: runReplay},
+	"run":           {summary: "trade in paper mode on live Kite data (--mode=live is gated off)", run: runTrade},
+	"shadow-report": {summary: "summarise the shadow log: every signal's market-neutral return at fixed horizons, traded or not", run: runShadowReport},
+	"study":         {summary: "backtest the pre-market picker over many days against buy-and-hold and a random list", run: runStudy},
+	"screen":        {summary: "pick the day's mid and small-cap watchlist from news, sector strength and the pre-open", run: runScreen},
+	"version":       {summary: "print the build version (the git SHA stamped into the image)", run: runVersion},
 }
 
 func main() {
@@ -64,7 +65,7 @@ func usage(w io.Writer) {
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		fmt.Fprintf(w, "  %-10s %s\n", name, commands[name].summary)
+		fmt.Fprintf(w, "  %-14s %s\n", name, commands[name].summary)
 	}
 }
 

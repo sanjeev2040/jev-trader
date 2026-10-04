@@ -24,6 +24,7 @@ import (
 	"github.com/sanjeev2040/jev-trader/internal/decisionlog"
 	"github.com/sanjeev2040/jev-trader/internal/domain"
 	"github.com/sanjeev2040/jev-trader/internal/engine"
+	"github.com/sanjeev2040/jev-trader/internal/orders/paper"
 	"github.com/sanjeev2040/jev-trader/internal/study"
 	"github.com/sanjeev2040/jev-trader/internal/watchlist"
 )
@@ -231,6 +232,62 @@ func TestStudyReplayerAnswersJevFromTheStoreTheSecondTime(t *testing.T) {
 	}
 }
 
+// The returns of the stocks the deciders do not trade are read from the stored
+// candles; they must be what the replay's buy-and-hold would have said.
+func TestStudyReturnsMatchTheReplaysBuyAndHold(t *testing.T) {
+	root := t.TempDir()
+	keys := []string{"NSE:AAA", "NSE:BBB", "NSE:DDD", "NSE:GONE"}
+	k := &studyKite{calls: map[int]int{}, empty: map[int]bool{14: true}} // DDD has no candles
+	if _, err := newTestBackfiller(root, k).fetch(context.Background(), "2026-09-28", keys); err != nil {
+		t.Fatal(err)
+	}
+	r, closeAll := newTestReplayer(t, root, "http://unused.invalid")
+	defer closeAll()
+	got, err := r.returns(context.Background(), "2026-09-28", []string{"NSE:AAA", "NSE:BBB", "NSE:DDD"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("returns for %d stocks, want the two with candles: %v", len(got), got)
+	}
+	rep, _, err := r.replay(context.Background(), study.ReplayRequest{Day: "2026-09-28", List: study.ListPicks, Keys: []string{"NSE:AAA", "NSE:BBB"}, Deciders: []string{"hold"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Comparison.BuyHold.Rows) != 2 {
+		t.Fatalf("%d buy-and-hold rows", len(rep.Comparison.BuyHold.Rows))
+	}
+	for _, row := range rep.Comparison.BuyHold.Rows {
+		g, ok := got[row.Instrument]
+		if !ok || row.DayClose == nil || g.DayPct == nil {
+			t.Fatalf("%s: returns %+v, row %+v", row.Instrument, g, row)
+		}
+		if d := g.WindowPct - row.ReturnPct; d > 1e-9 || d < -1e-9 {
+			t.Errorf("%s: window return %v, buy-and-hold %v", row.Instrument, g.WindowPct, row.ReturnPct)
+		}
+		if want := (*row.DayClose - row.StartPrice) / row.StartPrice * 100; *g.DayPct-want > 1e-9 || want-*g.DayPct > 1e-9 {
+			t.Errorf("%s: day return %v, want %v", row.Instrument, *g.DayPct, want)
+		}
+	}
+	// The window ends at 09:25; the day carries on to 10:29 and the two differ.
+	if a := got["NSE:AAA"]; a.DayPct == nil || *a.DayPct == a.WindowPct {
+		t.Errorf("window and day returns are the same: %+v", a)
+	}
+	if _, err := r.returns(context.Background(), "2026-09-28", []string{"NSE:NOPE"}); err == nil {
+		t.Error("a stock that is not in the master was read")
+	}
+}
+
+func TestRoundTripCostPct(t *testing.T) {
+	// ₹2,500 a name: about 10.6 basis points of charges and 2 of slippage a side (reports/0006-critique.md).
+	if got := roundTripCostPct(2500, paper.DefaultConfig()); got < 0.14 || got > 0.15 {
+		t.Errorf("round-trip cost of ₹2,500 = %.4f%%", got)
+	}
+	if roundTripCostPct(0, paper.DefaultConfig()) != 0 {
+		t.Error("no notional has a cost")
+	}
+}
+
 func TestStudyRunsEndToEndOnFixtures(t *testing.T) {
 	dataDir := t.TempDir()
 	k := &studyKite{calls: map[int]int{}, closed: map[string]bool{"2026-09-30": true}}
@@ -345,5 +402,94 @@ func TestStudyFlagErrors(t *testing.T) {
 		if code := run(context.Background(), args, e); code != 2 {
 			t.Errorf("%s: exit %d, stderr %q", name, code, stderr.String())
 		}
+	}
+}
+
+// --universe measures the whole screened pool and --anonymize-news changes what
+// is asked, so each is a different study: nothing stored under the other's
+// settings is reused for it.
+func TestStudyWholePoolAndAnonymisedFlags(t *testing.T) {
+	dataDir := t.TempDir()
+	k := &studyKite{calls: map[int]int{}}
+	var seen []studyOptions
+	old := buildStudyDeps
+	t.Cleanup(func() { buildStudyDeps = old })
+	buildStudyDeps = func(_ context.Context, _ env, o studyOptions, _ *slog.Logger) (study.Deps, func(), error) {
+		seen = append(seen, o)
+		studyDir := filepath.Join(o.dataDir, "study")
+		if err := os.MkdirAll(studyDir, 0o755); err != nil {
+			return study.Deps{}, nil, err
+		}
+		log, err := decisionlog.Open(o.logPath, decisionlog.Options{Synchronous: "NORMAL"})
+		if err != nil {
+			return study.Deps{}, nil, err
+		}
+		answers, err := study.OpenAnswerStore(filepath.Join(studyDir, "jev-answers.jsonl"))
+		if err != nil {
+			return study.Deps{}, nil, err
+		}
+		byKey := studyMaster()
+		rp := &studyReplayer{o: o, root: studyDir, byKey: byKey, index: byKey["NSE:NIFTY 50"], log: log, answers: answers}
+		return study.Deps{
+			Screen: func(_ context.Context, day string) (watchlist.File, error) {
+				f := watchlist.File{Version: 1, Date: day, Phase: watchlist.PhaseHistoric, Final: true}
+				f.Entries = []watchlist.Entry{{Rank: 1, Key: "NSE:AAA", Symbol: "AAA", Sector: "IT", Score: 0.5, Signals: map[string]float64{"news": 0.6}}}
+				for i, s := range []string{"AAA", "BBB", "CCC", "DDD", "EEE", "FFF"} {
+					p := watchlist.PoolEntry{Key: "NSE:" + s, Sector: "IT", Signals: map[string]float64{}}
+					switch i {
+					case 0:
+						p.Signals["news"], p.NewsItems = 0.6, 1
+					case 3:
+						p.Signals["news"], p.NewsItems = -0.5, 1 // bad news on a stock nobody picked
+					}
+					f.Pool = append(f.Pool, p)
+				}
+				return f, nil
+			},
+			Backfill: newTestBackfiller(studyDir, k).fetch,
+			Replay:   rp.replay,
+			Returns:  rp.returns,
+		}, func() { answers.Close(); log.Close() }, nil
+	}
+	args := func(extra ...string) []string {
+		return append([]string{"study", "--from", "2026-09-28", "--to", "2026-09-30", "--data-dir", dataDir, "--calendar", "", "--capital", "25000",
+			"--start", "09:15", "--end", "09:25", "--deciders", "hold", "--no-random", "--out", "-"}, extra...)
+	}
+	e, stdout, stderr := testEnv(nil)
+	if code := run(context.Background(), args("--universe", "--anonymize-news", "--max-news", "77", "--jev-rate", "3"), e); code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr.String())
+	}
+	md := stdout.String()
+	for _, want := range []string{
+		"## Market-neutral evidence", "the whole screened pool on 3 day(s)", "anonymised: the company's name and symbol and every date hidden", "at most 77 pairs a day",
+		"every other stock of the screened pool", "| news below 0 | 3 | 3 |", "| news above 0 | 3 | 3 |", "Long, excess after costs",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("report lacks %q\n%s", want, md)
+		}
+	}
+	if len(seen) != 1 || !seen[0].screen.AnonymizeNews || seen[0].screen.MaxNewsItems != 77 || seen[0].jevRate != 3 {
+		t.Fatalf("options = %+v", seen)
+	}
+
+	// The same range without the flags is another study.
+	e, stdout, stderr = testEnv(nil)
+	if code := run(context.Background(), args(), e); code != 0 {
+		t.Fatalf("plain exit %d: %s", code, stderr.String())
+	}
+	if len(seen) != 2 || seen[1].screen.AnonymizeNews || seen[1].jevRate != 10 || seen[1].screen.MaxNewsItems != 150 {
+		t.Errorf("defaults = %+v", seen[1])
+	}
+	if strings.Contains(stdout.String(), "the whole screened pool on") || !strings.Contains(stdout.String(), "the picks and the random list only") {
+		t.Errorf("the plain study reports the whole pool:\n%s", stdout.String())
+	}
+	for _, dir := range []string{"days", "watchlist"} {
+		if got, _ := filepath.Glob(filepath.Join(dataDir, "study", dir, "*")); len(got) != 2 {
+			t.Errorf("%s holds %d settings, want 2: %v", dir, len(got), got)
+		}
+	}
+	e, _, stderr = testEnv(nil)
+	if code := run(context.Background(), args("--jev-rate", "-1"), e); code != 2 || !strings.Contains(stderr.String(), "--jev-rate") {
+		t.Errorf("a negative rate: exit %d: %s", code, stderr.String())
 	}
 }

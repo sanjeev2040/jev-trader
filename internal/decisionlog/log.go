@@ -106,10 +106,15 @@ func (l *Log) init(ctx context.Context, memory bool) error {
 	if err := l.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("decisionlog: %w", err)
 	}
+	// Each version's statements, applied in order from the stored version.
+	var stmts []string
 	switch version {
 	case SchemaVersion:
 		return nil
 	case 0:
+		stmts = append(stmts, schema, appendOnly, shadowSchema, shadowAppendOnly)
+	case 1:
+		stmts = append(stmts, shadowSchema, shadowAppendOnly)
 	default:
 		return fmt.Errorf("%w: %d, want %d", ErrSchemaVersion, version, SchemaVersion)
 	}
@@ -118,9 +123,9 @@ func (l *Log) init(ctx context.Context, memory bool) error {
 		return fmt.Errorf("decisionlog: %w", err)
 	}
 	defer tx.Rollback()
-	for _, stmt := range []string{schema, appendOnly, fmt.Sprintf("PRAGMA user_version = %d", SchemaVersion)} {
+	for _, stmt := range append(stmts, fmt.Sprintf("PRAGMA user_version = %d", SchemaVersion)) {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("decisionlog: create schema: %w", err)
+			return fmt.Errorf("decisionlog: migrate schema from version %d: %w", version, err)
 		}
 	}
 	return tx.Commit()

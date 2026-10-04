@@ -84,6 +84,7 @@ func (e *Engine) onBarClosed(ctx context.Context, b domain.Bar) error {
 	if token == e.cfg.IndexToken || e.beforeWindow(b) {
 		return nil
 	}
+	e.shadowPicks(ctx, b.Start)
 	e.stats.Bars++
 	if !e.onCadence(b) {
 		e.stats.OffCadence++
@@ -239,6 +240,7 @@ func (e *Engine) onResult(ctx context.Context, r result) error {
 		return err
 	}
 	e.stats.Cycles++
+	e.shadowDecision(ctx, c, d, verdict.Reason, verdict.Detail, approved)
 	if d.Action == domain.ActionHold {
 		e.stats.Holds++
 		if d.HoldReason != "" {

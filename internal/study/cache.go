@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/sanjeev2040/jev-trader/internal/decide"
 	"github.com/sanjeev2040/jev-trader/internal/domain"
 )
@@ -165,6 +167,10 @@ type CachedDecider struct {
 	// Model is the pinned model id the answers are keyed under.
 	Model string
 	Store *AnswerStore
+	// Limiter, if set, spaces the calls that are paid for (an answer from the
+	// store is not limited), so a long study stays under the service's rate
+	// limit however many replays run.
+	Limiter *rate.Limiter
 
 	mu    sync.Mutex
 	usage Usage
@@ -182,6 +188,11 @@ func (c *CachedDecider) Decide(ctx context.Context, state json.RawMessage) (doma
 		c.usage.SavedOutputTokens += d.OutputTokens
 		c.mu.Unlock()
 		return d, nil
+	}
+	if c.Limiter != nil {
+		if err := c.Limiter.Wait(ctx); err != nil {
+			return domain.Decision{}, err
+		}
 	}
 	d, err := c.Inner.Decide(ctx, state)
 	if err != nil {

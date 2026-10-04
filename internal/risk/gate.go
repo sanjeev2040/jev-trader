@@ -1,7 +1,7 @@
 // Package risk is the deterministic risk gate. It has final authority over
 // every order: only this package can mint the Approval that the order manager
 // requires, and it emits the risk-driven exits (square-off, daily loss limit,
-// kill switch) without waiting for a decider.
+// kill switch, per-position stop and time exit) without waiting for a decider.
 package risk
 
 import (
@@ -44,6 +44,8 @@ const (
 // Exit reasons that are not also verdict reasons.
 const (
 	ReasonSquareOff Reason = "square_off"
+	ReasonStopLoss  Reason = "stop_loss" // a position went through its per-position stop
+	ReasonTimeExit  Reason = "time_exit" // a position was held for the maximum holding time
 )
 
 // Kill-switch reasons.
@@ -129,8 +131,9 @@ func (g *Gate) Limits() Limits {
 //  4. probability threshold for the chosen action (an entry's is the higher
 //     EntryMinProbability) and, for an entry, EntryConfirmations consecutive
 //     decisions for the same action;
-//  5. one order in flight per instrument; an exit before the position's
-//     minimum holding time; an entry within the re-entry cooldown, shorts,
+//  5. one order in flight per instrument; a decider's exit before the
+//     position's minimum holding time (the stop and the time exit are not
+//     decisions: Exits places them, and this check never sees them); an entry within the re-entry cooldown, shorts,
 //     the cost-aware check, the position cap and the capital budget;
 //  6. order-rate limits and the daily order budget.
 //
@@ -210,7 +213,7 @@ func (g *Gate) Evaluate(req Request, b *Book, now time.Time) Verdict {
 	price := b.marks[token]
 	if reduce {
 		if e, ok := b.entries[token]; ok && l.MinHold > 0 && now.Sub(e.at) < l.MinHold {
-			return refuse(ReasonMinHold, "held %s of the minimum %s since the entry at %s; square-off, the loss limit and the kill switch still exit at once",
+			return refuse(ReasonMinHold, "held %s of the minimum %s since the entry at %s; the stop, the time exit, the square-off, the loss limit and the kill switch still exit at once",
 				now.Sub(e.at).Round(time.Second), l.MinHold, e.at.In(l.Location).Format("15:04:05"))
 		}
 		qty = abs(pos)
@@ -284,7 +287,7 @@ func (g *Gate) Evaluate(req Request, b *Book, now time.Time) Verdict {
 	if reduce {
 		b.noteExit(token, now)
 	} else {
-		b.noteEntry(token, d.Probability, now)
+		b.noteEntry(token, d.Probability, g.stopFraction(b, token, price, now), now)
 		b.resetCalls(token) // adding to the position needs fresh confirmation
 	}
 	return Verdict{Reason: ReasonApproved, Detail: sized, approval: newApproval(intent, SourceDecision, ReasonApproved, now)}
@@ -367,9 +370,17 @@ func (g *Gate) rotate(req Request, b *Book, price float64, now time.Time) (Verdi
 // Exits returns the risk-driven exits due at time now. While the kill switch
 // is tripped, after the daily loss limit is breached, or at and after the
 // square-off time, every open position is closed with a reduce-only order.
-// Exits do not wait for a decider and do not count against the daily order
-// budget, but they do respect the per-second and per-minute order limits:
-// call Exits again on later events until the book is flat.
+// Otherwise each position is checked on its own: one that has gone through its
+// stop (Limits.StopLossPct, StopRangeMult) or been held for Limits.MaxHold is
+// closed (ReasonStopLoss, ReasonTimeExit), and its in-flight entry order, if
+// any, is cancelled first. None of these waits for a decider, and none is held
+// back by the minimum hold, the re-entry cooldown or the entry confirmations.
+// Exits do not count against the daily order budget, but they do respect the
+// per-second and per-minute order limits: call Exits again on later events
+// until the book is flat, or the position is out.
+//
+// ExitPlan.Reason is the book-wide reason, or the first position's when the
+// exits are per position; every Approval carries its own.
 func (g *Gate) Exits(b *Book, now time.Time) ExitPlan {
 	l := g.limits
 	now = now.In(l.Location)
@@ -385,17 +396,30 @@ func (g *Gate) Exits(b *Book, now time.Time) ExitPlan {
 		plan.Reason = ReasonDailyLoss
 	case !now.Before(l.SquareOff.On(now)):
 		plan.Reason = ReasonSquareOff
-	default:
-		return plan
 	}
-
-	for _, in := range b.inflightOrders() {
-		if !in.ReduceOnly {
-			plan.Cancel = append(plan.Cancel, in)
+	bookWide := plan.Reason != ""
+	if bookWide {
+		for _, in := range b.inflightOrders() {
+			if !in.ReduceOnly {
+				plan.Cancel = append(plan.Cancel, in)
+			}
 		}
 	}
+
 	for _, p := range b.Positions() {
 		token := p.Instrument.Token
+		reason, detail := plan.Reason, ""
+		if !bookWide {
+			if reason, detail = g.protective(b, p, now); reason == "" {
+				continue
+			}
+			if plan.Reason == "" {
+				plan.Reason = reason
+			}
+			if in, ok := b.inflight[token]; ok && !in.ReduceOnly {
+				plan.Cancel = append(plan.Cancel, in) // the exit follows once the entry order is gone
+			}
+		}
 		if b.InFlight(token) {
 			continue
 		}
@@ -407,7 +431,7 @@ func (g *Gate) Exits(b *Book, now time.Time) ExitPlan {
 			side = domain.ActionBuy
 		}
 		intent := domain.OrderIntent{
-			CycleID:    fmt.Sprintf("risk-%s-%d-%d", plan.Reason, token, now.UnixNano()),
+			CycleID:    fmt.Sprintf("risk-%s-%d-%d", reason, token, now.UnixNano()),
 			Instrument: p.Instrument,
 			Side:       side,
 			Quantity:   abs(p.Quantity),
@@ -416,9 +440,54 @@ func (g *Gate) Exits(b *Book, now time.Time) ExitPlan {
 		}
 		b.record(intent, now)
 		b.noteExit(token, now)
-		plan.Approvals = append(plan.Approvals, newApproval(intent, SourceRisk, plan.Reason, now))
+		plan.Approvals = append(plan.Approvals, newApproval(intent, SourceRisk, reason, now).withDetail(detail))
 	}
 	return plan
+}
+
+// protective says whether one position is due a per-position exit at now, and
+// why: the stop first, then the time exit. The reason is empty if neither is.
+func (g *Gate) protective(b *Book, p domain.Position, now time.Time) (Reason, string) {
+	l := g.limits
+	token := p.Instrument.Token
+	e, haveEntry := b.entries[token]
+	if mark, ok := b.marks[token]; ok && p.AvgPrice > 0 {
+		stop := l.StopLossPct // a position the book has no entry for gets the fixed stop
+		if haveEntry {
+			stop = e.stop
+		}
+		if stop > 0 {
+			level := p.AvgPrice * (1 - stop)
+			through := mark <= level
+			if p.Quantity < 0 {
+				level = p.AvgPrice * (1 + stop)
+				through = mark >= level
+			}
+			if through {
+				return ReasonStopLoss, fmt.Sprintf("last price %.2f is through the %.2f stop, %.2f%% from the %.2f average price (%.2f%% adverse); the minimum hold does not apply",
+					mark, level, 100*stop, p.AvgPrice, 100*math.Abs(mark/p.AvgPrice-1))
+			}
+		}
+	}
+	if haveEntry && l.MaxHold > 0 && now.Sub(e.at) >= l.MaxHold {
+		return ReasonTimeExit, fmt.Sprintf("held %s since the entry at %s, the maximum is %s; the minimum hold does not apply",
+			now.Sub(e.at).Round(time.Second), e.at.In(l.Location).Format("15:04:05"), l.MaxHold)
+	}
+	return "", ""
+}
+
+// stopFraction is the stop distance of a position opened at price, as a
+// fraction of that price: the larger of StopLossPct and StopRangeMult times the
+// recent range. It is zero when no stop applies.
+func (g *Gate) stopFraction(b *Book, token uint32, price float64, now time.Time) float64 {
+	l := g.limits
+	stop := l.StopLossPct
+	if l.StopRangeMult > 0 && price > 0 {
+		if r, ok := b.recentRange(token, now, l.RangeWindow); ok {
+			stop = max(stop, l.StopRangeMult*r/price)
+		}
+	}
+	return stop
 }
 
 // NoteRejection counts a broker rejection and trips the kill switch after

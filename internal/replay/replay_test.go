@@ -71,6 +71,7 @@ func config(t *testing.T, root string, log *decisionlog.Log) Config {
 	limits := risk.DefaultLimits()
 	limits.MinHold, limits.ReentryCooldown, limits.RotationMinHold = 5*time.Minute, 10*time.Minute, 5*time.Minute
 	limits.EntryConfirmations, limits.EntryMinProbability = 0, 0
+	limits.StopLossPct = 0 // stop_walk_test.go covers the stop
 	return Config{
 		Log: log,
 		NewSource: func() (marketdata.Source, error) {

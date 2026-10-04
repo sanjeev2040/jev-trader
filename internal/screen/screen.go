@@ -124,7 +124,7 @@ func Run(ctx context.Context, cfg Config, d Deps) (watchlist.File, error) {
 	file.Sectors = sectors.rows
 
 	// 5. News.
-	newsSignal, newsRefs, catalyst, newsRead := scoreNews(ctx, cfg, d, cands, &file)
+	newsSignal, newsRefs, catalyst, newsItems, newsRead := scoreNews(ctx, cfg, d, cands, &file)
 
 	// 6. Combine.
 	avail := map[string]bool{SignalRange: true, SignalNews: newsRead, SignalGap: gapRead, SignalSector: len(sectors.score) > 0}
@@ -161,7 +161,7 @@ func Run(ctx context.Context, cfg Config, d Deps) (watchlist.File, error) {
 	file.Entries = pick(cfg, ranked, newsRefs, sectors)
 	if cfg.KeepPool {
 		for _, r := range ranked {
-			p := watchlist.PoolEntry{Key: r.cand.stock.Key(), Sector: r.cand.stock.Industry, Score: round(r.score, 3), Signals: map[string]float64{}}
+			p := watchlist.PoolEntry{Key: r.cand.stock.Key(), Sector: r.cand.stock.Industry, Score: round(r.score, 3), Signals: map[string]float64{}, NewsItems: newsItems[r.cand.stock.Symbol]}
 			for name, v := range r.signals {
 				p.Signals[name] = round(v, 3)
 			}

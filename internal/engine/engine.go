@@ -11,8 +11,8 @@
 // For every closed bar of a watched instrument the engine builds a snapshot,
 // asks the decider, has the risk gate judge the answer, writes the cycle to
 // the decision log, and only then submits an approved order. Risk-driven exits
-// (square-off, loss limit, kill switch) do not wait for the decider and are
-// logged as cycles of their own.
+// (square-off, loss limit, kill switch, per-position stop and time exit) do
+// not wait for the decider and are logged as cycles of their own.
 package engine
 
 import (
@@ -132,6 +132,12 @@ type Config struct {
 	// DefaultEventBuffer.
 	EventBuffer int
 
+	// Shadow, when set, also logs every candidate signal to the decision log's
+	// shadow tables, traded or not (issue #60). It only writes: nothing it
+	// does can change what the engine decides or orders, and a failed write is
+	// counted and logged, never returned. Nil logs nothing; replay leaves it so.
+	Shadow *Shadow
+
 	// Kill delivers operator and watchdog kill requests (risk.WatchKill).
 	Kill <-chan risk.Reason
 	// Recorded are the intents logged before a restart. The order manager
@@ -153,6 +159,7 @@ type Stats struct {
 	Ticks, BarEvents  int // market-data events consumed
 	Bars              int // closed base-interval bars of watched instruments
 	OffCadence        int // of those, bars not on the decision cadence, so not decided on
+	ShadowErrors      int // shadow signals that could not be logged (the run goes on)
 	Cycles            int // decision cycles logged
 	Holds             int // cycles whose answer was a HOLD
 	HoldSubstitutions int // cycles whose HOLD replaced a decider failure
@@ -211,6 +218,8 @@ type Engine struct {
 	dayPnL, dayRealized     float64
 	carryPnL, carryRealized float64
 	lastEquity              time.Time
+
+	shadowPickDay string // the IST day whose picks are logged
 }
 
 // New validates cfg and returns an engine.

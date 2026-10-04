@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sanjeev2040/jev-trader/internal/jev"
+	"github.com/sanjeev2040/jev-trader/internal/news"
 	"github.com/sanjeev2040/jev-trader/internal/screen"
 	"github.com/sanjeev2040/jev-trader/internal/universe"
 	"github.com/sanjeev2040/jev-trader/internal/watchlist"
@@ -429,5 +432,54 @@ func TestPrintWatchlistSaysWhenThereAreNoCatalysts(t *testing.T) {
 	printWatchlist(&b, "x.json", watchlist.File{Date: "2026-10-05", Phase: watchlist.PhaseFinal, Entries: []watchlist.Entry{}})
 	if !strings.Contains(b.String(), "No catalysts today") {
 		t.Errorf("summary = %q", b.String())
+	}
+}
+
+type oneItemNews struct{}
+
+func (oneItemNews) Name() string { return "nse-announcements" }
+func (oneItemNews) Fetch(context.Context, time.Time, time.Time) ([]news.Item, error) {
+	return []news.Item{{Source: "nse-announcements", ID: "1", Symbol: "KPITTECH", Title: "KPIT Technologies bags an order on 1 January 2020",
+		Published: time.Date(2020, 1, 1, 20, 0, 0, 0, watchlist.IST)}}, nil
+}
+
+type askRecorder struct{ states []string }
+
+func (a *askRecorder) Ask(_ context.Context, state any, _ map[string]jev.Question) (jev.Answers, error) {
+	body, _ := json.Marshal(state)
+	a.states = append(a.states, string(body))
+	return jev.Answers{Answers: map[string]jev.Answer{
+		"impact":    {Type: jev.TypeScore, Score: 3},
+		"material":  {Type: jev.TypeNoul, Noul: 0.9},
+		"direction": {Type: jev.TypeChoice, Probabilities: map[string]float64{"UP": 0.9, "DOWN": 0.05, "NEUTRAL": 0.05}},
+	}}, nil
+}
+
+func TestScreenAnonymizeNewsHidesTheCompanyAndTheDate(t *testing.T) {
+	old := buildScreenDeps
+	t.Cleanup(func() { buildScreenDeps = old })
+	var rec *askRecorder
+	buildScreenDeps = func(context.Context, env, screenOptions, *slog.Logger) (screen.Deps, error) {
+		rec = &askRecorder{}
+		return screen.Deps{NSE: screenNSE, Market: screenMarket{}, News: []news.Source{oneItemNews{}}, Jev: rec, Model: "jev-1.13.0"}, nil
+	}
+	args := func(dir string, extra ...string) []string {
+		return append([]string{"screen", "--date", "2020-01-02", "--out-dir", t.TempDir(), "--data-dir", dir, "--top", "2"}, extra...)
+	}
+	data := t.TempDir()
+	e, _, stderr := testEnv(nil)
+	if code := run(context.Background(), args(data, "--anonymize-news"), e); code != 0 {
+		t.Fatalf("code %d, stderr %q", code, stderr.String())
+	}
+	if len(rec.states) != 1 || strings.Contains(rec.states[0], "KPIT") || strings.Contains(rec.states[0], "2020") || !strings.Contains(rec.states[0], "bags an order on [date]") {
+		t.Fatalf("anonymised request = %v", rec.states)
+	}
+	// Named is another request, so it is asked for itself.
+	e, _, stderr = testEnv(nil)
+	if code := run(context.Background(), args(data), e); code != 0 {
+		t.Fatalf("code %d, stderr %q", code, stderr.String())
+	}
+	if len(rec.states) != 1 || !strings.Contains(rec.states[0], "KPIT Technologies") || !strings.Contains(rec.states[0], "2020-01-01 20:00 IST") {
+		t.Errorf("named request = %v", rec.states)
 	}
 }

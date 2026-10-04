@@ -36,7 +36,7 @@ func testLimits() Limits {
 	l := DefaultLimits()
 	l.CapitalBudget = 250_000
 	l.SizeFraction = map[string]float64{domain.SizeS: 0.04, domain.SizeM: 0.10, domain.SizeL: 0.20}
-	l.MinHold, l.ReentryCooldown, l.CostAware, l.EntryConfirmations, l.EntryMinProbability = 0, 0, false, 0, 0 // churn_test.go covers these
+	l.MinHold, l.ReentryCooldown, l.CostAware, l.EntryConfirmations, l.EntryMinProbability, l.StopLossPct = 0, 0, false, 0, 0, 0 // churn_test.go covers these
 	return l
 }
 
@@ -83,6 +83,12 @@ func TestNewGateRejectsInvalidLimits(t *testing.T) {
 		"negative cost margin":        func(l *Limits) { l.CostMargin = -0.001 },
 		"cost margin of ten percent":  func(l *Limits) { l.CostMargin = 0.1 },
 		"cost check without a window": func(l *Limits) { l.CostAware = true; l.RangeWindow = 0 },
+		"stop of 100 percent":         func(l *Limits) { l.StopLossPct = 1 },
+		"negative stop":               func(l *Limits) { l.StopLossPct = -0.01 },
+		"NaN stop":                    func(l *Limits) { l.StopLossPct = math.NaN() },
+		"negative range stop":         func(l *Limits) { l.StopRangeMult = -1 },
+		"range stop without a window": func(l *Limits) { l.CostAware = false; l.StopRangeMult = 2; l.RangeWindow = 0 },
+		"negative max hold":           func(l *Limits) { l.MaxHold = -time.Second },
 		"zero position cap":           func(l *Limits) { l.MaxPositionNotional = 0 },
 		"gross below position cap":    func(l *Limits) { l.MaxGrossNotional = l.MaxPositionNotional - 1 },
 		"zero daily loss":             func(l *Limits) { l.MaxDailyLoss = 0 },

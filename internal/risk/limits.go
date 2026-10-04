@@ -31,6 +31,12 @@ const (
 	DefaultEntryConfirmations  = 2
 )
 
+// DefaultStopLossPct is the per-position stop (issue #59): a position is sold
+// once it is 2% below its average price, whatever the minimum hold says. A
+// round trip costs about 0.15%, so 2% is a loss the bot will take rather than
+// a wiggle it will not sit through.
+const DefaultStopLossPct = 0.02
+
 // IST is India Standard Time. It has no daylight saving, so a fixed zone is
 // exact and needs no tzdata.
 var IST = time.FixedZone("IST", 5*60*60+30*60)
@@ -98,8 +104,8 @@ type Limits struct {
 
 	// MinHold is how long a position must have been held before a decider's
 	// exit is allowed; until then the gate refuses it (ReasonMinHold). It
-	// never delays a risk-driven exit: the square-off, the daily loss limit
-	// and the kill switch flatten the book at once. A position the book has no
+	// never delays a risk-driven exit: the stop, the time exit, the square-off,
+	// the daily loss limit and the kill switch sell at once. A position the book has no
 	// entry time for, such as one restored from the journal, is not held back.
 	// Zero turns the check off.
 	MinHold time.Duration
@@ -107,6 +113,27 @@ type Limits struct {
 	// (an exit, a risk exit or a rotation) before it may open a new position
 	// in it again (ReasonCooldown). Zero turns the check off.
 	ReentryCooldown time.Duration
+
+	// StopLossPct is the per-position stop, as a fraction of the position's
+	// average price: a long is sold once its last price is that far below it
+	// (a short is bought back once it is that far above). StopRangeMult widens
+	// it for a volatile stock: the stop distance is the larger of StopLossPct
+	// and StopRangeMult times the instrument's price range over RangeWindow,
+	// read when the position is opened and then kept, so a falling price cannot
+	// widen its own stop. Either may be zero; with both zero there is no stop.
+	// The stop is a risk exit like the square-off: Gate.Exits places it on the
+	// first mark through the stop level, a decider is not asked, and the
+	// minimum hold, the re-entry cooldown and the entry confirmations never
+	// delay it (ReasonStopLoss). A gap through the level exits at the gapped
+	// price. A position the book has no entry for, such as one restored from
+	// the journal, is stopped on StopLossPct alone.
+	StopLossPct   float64
+	StopRangeMult float64
+	// MaxHold is the time exit: a position is sold once it has been held this
+	// long, counted from its first entry (ReasonTimeExit). Like the stop it
+	// ignores MinHold and is placed by Gate.Exits without a decider. Zero turns
+	// it off. A position without an entry time is not timed out.
+	MaxHold time.Duration
 
 	// CostAware turns on the cost-aware entry check: an entry is refused
 	// unless the expected move beats the round-trip costs plus a margin
@@ -164,6 +191,7 @@ func DefaultLimits() Limits {
 		RotationMinHold:          DefaultMinHold,
 		MinHold:                  DefaultMinHold,
 		ReentryCooldown:          DefaultReentryCooldown,
+		StopLossPct:              DefaultStopLossPct,
 		CostAware:                true,
 		CostMargin:               0.0005,
 		RangeWindow:              30 * time.Minute,
@@ -250,11 +278,20 @@ func (l Limits) Validate() error {
 	if l.MinHold < 0 || l.ReentryCooldown < 0 {
 		bad("minimum hold and re-entry cooldown must not be negative, got %s and %s", l.MinHold, l.ReentryCooldown)
 	}
+	if !(l.StopLossPct >= 0 && l.StopLossPct < 1) {
+		bad("stop loss must be a fraction in [0, 1) (0 is off), got %v", l.StopLossPct)
+	}
+	if !(l.StopRangeMult >= 0) || math.IsInf(l.StopRangeMult, 0) {
+		bad("stop range multiple must be 0 (off) or positive, got %v", l.StopRangeMult)
+	}
+	if l.MaxHold < 0 {
+		bad("max hold must not be negative, got %s", l.MaxHold)
+	}
 	if !(l.CostMargin >= 0 && l.CostMargin < 0.1) {
 		bad("cost margin must be in [0, 0.1), got %v", l.CostMargin)
 	}
-	if l.CostAware && !(l.RangeWindow > 0 && l.RangeWindow <= rangeKeep) {
-		bad("range window must be in (0, %s] when the cost-aware check is on, got %s", rangeKeep, l.RangeWindow)
+	if (l.CostAware || l.StopRangeMult > 0) && !(l.RangeWindow > 0 && l.RangeWindow <= rangeKeep) {
+		bad("range window must be in (0, %s] when the cost-aware check or the range stop is on, got %s", rangeKeep, l.RangeWindow)
 	}
 	positive("max position notional", l.MaxPositionNotional)
 	positive("max gross notional", l.MaxGrossNotional)

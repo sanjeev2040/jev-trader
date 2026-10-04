@@ -191,7 +191,7 @@ func TestMinHoldNeverDelaysRiskExits(t *testing.T) {
 	b = NewBook()
 	b.SetPosition(domain.Position{Instrument: inst(1), Quantity: 5, AvgPrice: relPrice})
 	b.Mark(1, relPrice)
-	b.noteEntry(1, 0.8, at(15, 9))
+	b.noteEntry(1, 0.8, 0, at(15, 9))
 	if plan := g.Exits(b, at(15, 10)); plan.Reason != ReasonSquareOff || len(plan.Approvals) != 1 {
 		t.Fatalf("square-off exit plan = %+v", plan)
 	}
@@ -280,7 +280,7 @@ func TestReentryCooldownFollowsARotation(t *testing.T) {
 
 func TestChurnChecksAreOffWhenZero(t *testing.T) {
 	g := churnGate(t, func(l *Limits) {
-		l.MinHold, l.ReentryCooldown, l.CostAware, l.EntryConfirmations, l.EntryMinProbability = 0, 0, false, 0, 0
+		l.MinHold, l.ReentryCooldown, l.CostAware, l.EntryConfirmations, l.EntryMinProbability, l.StopLossPct = 0, 0, false, 0, 0, 0
 	})
 	b := NewBook()
 	feed(b, 1, at(9, 30), 30, relPrice, 2)

@@ -27,6 +27,7 @@ import (
 	kitebroker "github.com/sanjeev2040/jev-trader/internal/orders/kite"
 	"github.com/sanjeev2040/jev-trader/internal/orders/paper"
 	"github.com/sanjeev2040/jev-trader/internal/risk"
+	"github.com/sanjeev2040/jev-trader/internal/shadow"
 	"github.com/sanjeev2040/jev-trader/internal/snapshot"
 	"github.com/sanjeev2040/jev-trader/internal/store"
 	"github.com/sanjeev2040/jev-trader/internal/watchlist"
@@ -66,6 +67,7 @@ func trade(ctx context.Context, args []string, e env) error {
 	stateDir := fs.String("state-dir", "", "state directory holding the Kite session and the KILL file (default $XDG_STATE_HOME/jevtrader or ~/.local/state/jevtrader)")
 	logPath := fs.String("log", defaultDecisionLog, "decision log (SQLite)")
 	record := fs.Bool("record", true, "also record ticks and closed bars under --data-dir")
+	shadow := fs.Bool("shadow", true, "also log every candidate signal, traded or not (the picker's entries and every decider answer), for `jevtrader shadow-report`; it never changes what is traded")
 	buffer := fs.Int("buffer", 8192, "market-data channel capacity")
 	fs.Usage = func() {
 		fmt.Fprintln(e.stderr, "usage: jevtrader run (--watchlist NSE:INFY,NSE:TCS | --watchlist-file state/watchlist/YYYY-MM-DD.json) [flags]\n\nTrades on live Kite data with Jev decisions, the risk gate and the paper broker.\nRun `jevtrader login` first. Reads KITE_API_KEY, KITE_API_SECRET and JEV_API_KEY from the environment, or from the\nAzure Key Vault named by JEVTRADER_KEYVAULT.\n\nflags:")
@@ -94,7 +96,7 @@ func trade(ctx context.Context, args []string, e env) error {
 		return usageError{err}
 	}
 	logger := slog.New(slog.NewTextHandler(e.stderr, nil))
-	symbols, err := resolveWatchlist(static, *watchlistFile, time.Now(), logger)
+	symbols, listFile, err := resolveWatchlistFile(static, *watchlistFile, time.Now(), logger)
 	if err != nil {
 		return err
 	}
@@ -162,12 +164,17 @@ func trade(ctx context.Context, args []string, e env) error {
 		return err
 	}
 
+	var picks []engine.ShadowPick
+	if *shadow {
+		picks = shadowPicks(listFile, symbols, instruments)
+	}
 	return tradeSession(ctx, tradeConfig{
 		runID: modePaper + "-" + time.Now().UTC().Format("20060102T150405"), mode: *mode,
 		source: src, sourceName: "kite", decider: jevClient, deciderName: "jev",
 		logPath: *logPath, dataDir: *dataDir, stateDir: *stateDir,
 		indexToken: indexToken, record: *record, buffer: *buffer, decideTimeout: *decideTimeout,
 		limits: limits, decideEvery: rules.decideEvery, clock: clock.Wall{}, logger: logger, instruments: len(symbols),
+		shadow: *shadow, picks: picks,
 	})
 }
 
@@ -177,20 +184,47 @@ func trade(ctx context.Context, args []string, e env) error {
 // exists: the session trades the static list and says why. With no static list
 // to fall back on it is.
 func resolveWatchlist(static []string, path string, now time.Time, logger *slog.Logger) ([]string, error) {
+	keys, _, err := resolveWatchlistFile(static, path, now, logger)
+	return keys, err
+}
+
+// resolveWatchlistFile is resolveWatchlist that also returns the watchlist
+// file when its instruments are the ones returned, nil when the static list is.
+func resolveWatchlistFile(static []string, path string, now time.Time, logger *slog.Logger) ([]string, *watchlist.File, error) {
 	if path == "" {
-		return static, nil
+		return static, nil, nil
 	}
 	f, err := watchlist.Load(path, now)
 	if err == nil {
 		logger.Info("watchlist from file", "path", path, "date", f.Date, "phase", f.Phase, "final", f.Final,
 			"generated_at", f.GeneratedAt.Format(time.RFC3339), "instruments", strings.Join(f.Keys(), ","))
-		return f.Keys(), nil
+		return f.Keys(), &f, nil
 	}
 	if len(static) == 0 {
-		return nil, fmt.Errorf("watchlist file: %w (and no --watchlist to fall back on)", err)
+		return nil, nil, fmt.Errorf("watchlist file: %w (and no --watchlist to fall back on)", err)
 	}
 	logger.Warn("watchlist file not used; trading the static --watchlist", "path", path, "reason", err.Error(), "instruments", strings.Join(static, ","))
-	return static, nil
+	return static, nil, nil
+}
+
+// shadowPicks are the picker entries of the watchlist file the session trades,
+// with the instruments they resolved to (instruments follows keys, and may
+// have the index after them). A static list has no picker behind it.
+func shadowPicks(f *watchlist.File, keys []string, instruments []domain.Instrument) []engine.ShadowPick {
+	if f == nil {
+		return nil
+	}
+	entries := make(map[string]watchlist.Entry, len(f.Entries))
+	for _, e := range f.Entries {
+		entries[e.Key] = e
+	}
+	var picks []engine.ShadowPick
+	for i, k := range keys {
+		if e, ok := entries[k]; ok && i < len(instruments) {
+			picks = append(picks, engine.ShadowPick{Instrument: instruments[i], Detail: shadow.EncodePick(e)})
+		}
+	}
+	return picks
 }
 
 // liveGate keeps run from ever placing a real order. Paper passes. Live asks
@@ -243,6 +277,10 @@ type tradeConfig struct {
 	clock         clock.Clock
 	logger        *slog.Logger
 	instruments   int // traded instruments, for the log
+	// shadow also logs every candidate signal (issue #60); picks are the
+	// picker entries among them.
+	shadow bool
+	picks  []engine.ShadowPick
 }
 
 // tradeSession runs the engine on the wall clock with the paper broker until
@@ -279,6 +317,15 @@ func tradeSession(ctx context.Context, rc tradeConfig) (err error) {
 		Snapshot:   snapshot.Config{SizeThresholds: sizeThresholds(rc.limits)},
 		IndexToken: rc.indexToken, DecideTimeout: rc.decideTimeout, AdvanceEvery: time.Second,
 		EventBuffer: rc.buffer, Recorded: recorded, Logger: rc.logger,
+	}
+	if rc.shadow {
+		// Signals count from the first moment the gate lets an entry through,
+		// and the window ends where entries stop.
+		cfg.Shadow = &engine.Shadow{
+			Picks:     rc.picks,
+			PickTime:  time.Duration(rc.limits.EntryStart.Hour)*time.Hour + time.Duration(rc.limits.EntryStart.Minute)*time.Minute,
+			WindowEnd: time.Duration(rc.limits.EntryEnd.Hour)*time.Hour + time.Duration(rc.limits.EntryEnd.Minute)*time.Minute,
+		}
 	}
 
 	var recWG sync.WaitGroup
