@@ -9,6 +9,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the system overview and the diagrams 
 
 `jevtrader study` backtests the picker over several past weeks against buy-and-hold of the picks and a random list of the same size, with hit rates, calibration, which signals went with the morning's return, and Jev's token cost. See [docs/picker-study.md](docs/picker-study.md) and [reports/0005-picker-study.md](reports/0005-picker-study.md).
 
+`jevtrader run` also shadow-logs every candidate signal, traded or not, and `jevtrader shadow-report --from --to` summarises what the market did after each (market-neutral return at +15m, +60m, the window end and the day close, with a day-resampled 95% interval and the hit rate), so forward evidence accumulates independently of the capital cap. See [docs/run-and-replay.md](docs/run-and-replay.md#the-shadow-log-and-jevtrader-shadow-report).
+
 ## CI
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on every pull request into `dev` and `main` and on pushes to `dev`. The `test` job runs `go build ./...`, `go vet ./...` and `go test -race ./...`; the `docker` job builds the image (not pushed) and the `bicep` job compiles `infra/main.bicep`. Tests use fixtures only and need no secrets. Superseded runs on the same PR or branch are cancelled. To run the same checks locally:

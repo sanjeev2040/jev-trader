@@ -1,8 +1,12 @@
 package decisionlog
 
 // SchemaVersion is the version of the SQLite schema, stored in
-// PRAGMA user_version. Any change to a table must bump it.
-const SchemaVersion = 1
+// PRAGMA user_version. Any change to a table must bump it, and a log written
+// at an older version must open: init migrates it forward in one transaction.
+//
+//	1  runs, cycles, order_events, equity
+//	2  adds shadow_signals and shadow_outcomes (issue #60)
+const SchemaVersion = 2
 
 // The log is append-only: rows are inserted and never changed. The triggers
 // make that a property of the database rather than of the code that uses it.
@@ -95,4 +99,58 @@ CREATE TRIGGER order_events_no_update BEFORE UPDATE ON order_events BEGIN SELECT
 CREATE TRIGGER order_events_no_delete BEFORE DELETE ON order_events BEGIN SELECT RAISE(ABORT, 'decisionlog is append-only'); END;
 CREATE TRIGGER equity_no_update BEFORE UPDATE ON equity BEGIN SELECT RAISE(ABORT, 'decisionlog is append-only'); END;
 CREATE TRIGGER equity_no_delete BEFORE DELETE ON equity BEGIN SELECT RAISE(ABORT, 'decisionlog is append-only'); END;
+`
+
+// shadowSchema is what version 2 adds: the shadow log (issue #60). Every
+// candidate signal is a shadow_signals row whether or not anything was traded
+// on it; what the market did afterwards is one shadow_outcomes row per signal
+// and horizon, appended later from the recorded bars, so both tables stay
+// append-only. A fresh log creates them with the rest; a version 1 log gets
+// them by migration, and no existing row is touched.
+const shadowSchema = `
+CREATE TABLE shadow_signals (
+	signal_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+	run_id         TEXT NOT NULL REFERENCES runs(run_id),
+	day            TEXT NOT NULL,            -- the IST trading day, YYYY-MM-DD
+	kind           TEXT NOT NULL,            -- 'pick' (a picker entry) or 'decision' (a decider's answer)
+	signal         TEXT NOT NULL,            -- the report's label: 'pick', 'decision:BUY', 'decision:SELL', 'decision:HOLD', 'decision:FAILED'
+	token          INTEGER NOT NULL,
+	exchange       TEXT NOT NULL,
+	symbol         TEXT NOT NULL,
+	ref_time       INTEGER NOT NULL,         -- when the signal was formed; every horizon counts from here
+	ref_price      REAL NOT NULL DEFAULT 0,  -- price at ref_time when known as the signal was written, else 0 (read from the bars)
+	window_end     INTEGER NOT NULL DEFAULT 0, -- end of the trading window of the day, 0 if none
+	index_token    INTEGER NOT NULL DEFAULT 0, -- the index to net the return against, 0 if none
+	direction      INTEGER NOT NULL,         -- +1 a bet on a rise (and a HOLD, read as a rise), -1 a bet on a fall
+	cycle_id       TEXT NOT NULL DEFAULT '', -- the cycles row of a decision
+	action         TEXT NOT NULL DEFAULT '',
+	probability    REAL NOT NULL DEFAULT 0,
+	verdict        TEXT NOT NULL DEFAULT '', -- the risk gate's reason code
+	verdict_detail TEXT NOT NULL DEFAULT '',
+	traded         INTEGER NOT NULL DEFAULT 0, -- the gate approved an order on it
+	detail         TEXT,                     -- JSON: a pick's rank, score, signals and news scores
+	UNIQUE (day, kind, token, ref_time)
+);
+CREATE INDEX shadow_signals_day ON shadow_signals(day, signal_id);
+
+CREATE TABLE shadow_outcomes (
+	signal_id       INTEGER NOT NULL REFERENCES shadow_signals(signal_id),
+	horizon         TEXT NOT NULL,           -- '+15m', '+60m', 'window_end' or 'day_close'
+	target_time     INTEGER NOT NULL,
+	ref_price       REAL NOT NULL,
+	price           REAL NOT NULL,           -- the close of the last bar at or before target_time
+	return_pct      REAL NOT NULL,           -- the stock's move from ref_price to price, in percent
+	index_pct       REAL,                    -- the signal's index over the same interval, NULL if unknown
+	universe_pct    REAL,                    -- the mean move of every recorded stock of the day, NULL if none
+	universe_names  INTEGER NOT NULL DEFAULT 0,
+	filled_at       INTEGER NOT NULL,
+	PRIMARY KEY (signal_id, horizon)
+);
+`
+
+const shadowAppendOnly = `
+CREATE TRIGGER shadow_signals_no_update BEFORE UPDATE ON shadow_signals BEGIN SELECT RAISE(ABORT, 'decisionlog is append-only'); END;
+CREATE TRIGGER shadow_signals_no_delete BEFORE DELETE ON shadow_signals BEGIN SELECT RAISE(ABORT, 'decisionlog is append-only'); END;
+CREATE TRIGGER shadow_outcomes_no_update BEFORE UPDATE ON shadow_outcomes BEGIN SELECT RAISE(ABORT, 'decisionlog is append-only'); END;
+CREATE TRIGGER shadow_outcomes_no_delete BEFORE DELETE ON shadow_outcomes BEGIN SELECT RAISE(ABORT, 'decisionlog is append-only'); END;
 `

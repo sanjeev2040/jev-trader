@@ -132,11 +132,19 @@ func TestLogIsAppendOnly(t *testing.T) {
 	if err := l.AppendEquity(bg, "r1", EquityPoint{Time: t0}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := l.AppendShadowSignal(bg, shadowSignal("decision:BUY", t0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.AppendShadowOutcome(bg, ShadowOutcome{SignalID: 1, Horizon: "+15m", Target: t0, RefPrice: 1, Price: 1, FilledAt: t0}); err != nil {
+		t.Fatal(err)
+	}
 	for _, stmt := range []string{
 		`UPDATE runs SET note = 'x'`, `DELETE FROM runs`,
 		`UPDATE cycles SET verdict = 'x'`, `DELETE FROM cycles`,
 		`UPDATE order_events SET status = 'x'`, `DELETE FROM order_events`,
 		`UPDATE equity SET pnl = 1`, `DELETE FROM equity`,
+		`UPDATE shadow_signals SET signal = 'x'`, `DELETE FROM shadow_signals`,
+		`UPDATE shadow_outcomes SET price = 1`, `DELETE FROM shadow_outcomes`,
 	} {
 		if _, err := l.db.Exec(stmt); err == nil || !strings.Contains(err.Error(), "append-only") {
 			t.Errorf("%s: err = %v, want an append-only refusal", stmt, err)
