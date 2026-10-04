@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -215,5 +216,31 @@ func TestMatcher(t *testing.T) {
 				t.Errorf("Match(%q) = %v, want %v", tt.it.Title, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestNameTermsListsTheWaysACompanyIsWritten(t *testing.T) {
+	join := func(ts [][]string) []string {
+		var out []string
+		for _, w := range ts {
+			out = append(out, strings.Join(w, " "))
+		}
+		return out
+	}
+	got := join(NameTerms("KPIT Technologies Ltd."))
+	if want := []string{"kpit technologies", "kpit"}; !slices.Equal(got, want) {
+		t.Errorf("KPIT = %v, want %v", got, want)
+	}
+	// Short and common words are kept: the caller hides, it does not find.
+	got = join(NameTerms("Tata Motors Ltd"))
+	if want := []string{"tata motors", "tata", "motors"}; !slices.Equal(got, want) {
+		t.Errorf("Tata Motors = %v, want %v", got, want)
+	}
+	got = join(NameTerms("Mahindra & Mahindra Ltd."))
+	if want := []string{"mahindra and mahindra", "mahindra"}; !slices.Equal(got, want) {
+		t.Errorf("M&M = %v, want %v", got, want)
+	}
+	if len(NameTerms("")) != 0 {
+		t.Error("an empty name has terms")
 	}
 }

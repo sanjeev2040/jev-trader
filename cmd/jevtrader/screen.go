@@ -97,6 +97,7 @@ func screenCmd(ctx context.Context, args []string, e env) error {
 	minScore := fs.Float64("min-score", def.MinScore, "least score an entry needs")
 	newsWindow := fs.Duration("news-window", def.NewsWindow, "how far back to read news")
 	maxNews := fs.Int("max-news", def.MaxNewsItems, "most (news item, company) pairs scored by Jev per run")
+	anonymize := fs.Bool("anonymize-news", false, "look-ahead control: hide the company's name, its symbol and every date from the text sent to Jev (and leave out the publication time), so the scores come from the wording alone; the scores are cached apart from the named ones")
 	sources := fs.String("news-sources", "all", `comma-separated news sources: nse-announcements and the RSS feeds `+feedNames()+`; "all" or "none"`)
 	model := fs.String("model", jev.DefaultModel, "pinned Jev model id (\"jev-latest\" is rejected)")
 	jevURL := fs.String("jev-url", "", "Jev base URL (default: the public API)")
@@ -128,7 +129,7 @@ func screenCmd(ctx context.Context, args []string, e env) error {
 	cfg.Filters.MinPrice, cfg.Filters.MaxPrice = *minPrice, *maxPrice
 	cfg.MaxPerSector, cfg.MinScore = *maxPerSector, *minScore
 	cfg.Catalyst = screen.Catalyst{Require: *requireCatalyst, MinMaterial: *catMaterial, MinDirection: *catDirection, MinImpact: *catImpact}
-	cfg.NewsWindow, cfg.MaxNewsItems = *newsWindow, *maxNews
+	cfg.NewsWindow, cfg.MaxNewsItems, cfg.AnonymizeNews = *newsWindow, *maxNews, *anonymize
 	cfg.CacheDir = *dataDir
 	if err := cfg.Validate(); err != nil {
 		return usageError{err}

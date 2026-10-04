@@ -107,6 +107,11 @@ type Config struct {
 	SectorIndexes map[string]string
 	// CacheDir holds the day's universe and candle caches.
 	CacheDir string
+	// AnonymizeNews hides the company's name, its symbol and every date from the
+	// text sent to Jev, and leaves the publication time out: the look-ahead
+	// control that lets a study compare the news signal with and without the
+	// details a model that has seen the period could recall.
+	AnonymizeNews bool
 	// KeepPool records every screened stock, picked or not, in the file's
 	// Pool, for the picker study to draw its comparison list from.
 	KeepPool bool

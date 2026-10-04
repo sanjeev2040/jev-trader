@@ -64,6 +64,9 @@ type PoolEntry struct {
 	Sector  string             `json:"sector"`
 	Score   float64            `json:"score"`
 	Signals map[string]float64 `json:"signals"`
+	// NewsItems is how many news items Jev scored about the stock, so a stock
+	// whose items netted to zero can be told from one with none.
+	NewsItems int `json:"news_items,omitempty"`
 }
 
 // Sector is a group of the universe and its strength.

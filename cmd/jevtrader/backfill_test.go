@@ -15,9 +15,11 @@ import (
 	"time"
 
 	kiteconnect "github.com/zerodha/gokiteconnect/v4"
+	"github.com/zerodha/gokiteconnect/v4/models"
 	"golang.org/x/time/rate"
 
 	"github.com/sanjeev2040/jev-trader/internal/domain"
+	"github.com/sanjeev2040/jev-trader/internal/screen"
 	"github.com/sanjeev2040/jev-trader/internal/store"
 )
 
@@ -206,5 +208,40 @@ func TestParseBackfill(t *testing.T) {
 	}
 	if fmt.Sprint(job.tokens) != "[5 3]" || !job.to.Equal(job.from) || len(job.derived) != 2 {
 		t.Errorf("job = %+v", job)
+	}
+}
+
+// flakyKite answers with a rate-limit error the first n times it is asked, as
+// Kite does when a long study meets its limit, then serves the candles.
+type flakyKite struct {
+	fails, calls int
+	err          error
+}
+
+func (f *flakyKite) GetHistoricalData(int, string, time.Time, time.Time, bool, bool) ([]kiteconnect.HistoricalData, error) {
+	f.calls++
+	if f.calls <= f.fails {
+		return nil, f.err
+	}
+	return []kiteconnect.HistoricalData{{Date: models.Time{Time: time.Date(2026, 9, 1, 9, 15, 0, 0, ist)}, Open: 10, High: 11, Low: 9, Close: 10, Volume: 100}}, nil
+}
+
+func TestBackfillRetriesATransientKiteError(t *testing.T) {
+	screen.RetryBackoff = time.Millisecond
+	t.Cleanup(func() { screen.RetryBackoff = time.Second })
+	job, err := parseBackfill("1", "", "2026-09-01", "", "", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	k := &flakyKite{fails: 2, err: kiteconnect.NewError(kiteconnect.GeneralError, "Too many requests", nil)}
+	got, err := job.fetchChunk(ctx, k, rate.NewLimiter(rate.Inf, 1), job.from, job.from.Add(24*time.Hour))
+	if err != nil || len(got) != 1 || k.calls != 3 {
+		t.Errorf("a rate limit twice: %v, %d bars, %d calls", err, len(got), k.calls)
+	}
+	// An expired session is not worth another try.
+	k = &flakyKite{fails: 9, err: kiteconnect.NewError(kiteconnect.TokenError, "session expired", nil)}
+	if _, err := job.fetchChunk(ctx, k, rate.NewLimiter(rate.Inf, 1), job.from, job.from.Add(24*time.Hour)); err == nil || k.calls != 1 {
+		t.Errorf("a token error: %v after %d calls", err, k.calls)
 	}
 }
