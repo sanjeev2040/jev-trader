@@ -40,6 +40,7 @@ var dateRes = []struct {
 	{regexp.MustCompile(`(?i)\b\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?` + monthAny + `(?:,?\s+(?:19|20)\d{2})?`), "[date]"},
 	{regexp.MustCompile(`(?i)\b` + monthAny + `\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+(?:19|20)\d{2})?\b`), "[date]"},
 	{regexp.MustCompile(`(?i)\b` + monthAny + `,?\s+(?:19|20)\d{2}\b`), "[date]"},
+	{regexp.MustCompile(`(?i)\b[QH][1-4](FY\s?'?\d)`), "[quarter] ${1}"},
 	{regexp.MustCompile(`(?i)\bFY\s?'?\d{2,4}(?:\s?-\s?\d{2,4})?\b`), "[period]"},
 	{yearRe, "[year]"},
 	{regexp.MustCompile(`(?i)\b(?:` + months + `)\b`), "[month]"},

@@ -22,6 +22,7 @@ func TestAnonymizeTextHidesTheCompanyAndTheDates(t *testing.T) {
 		{"Central Depository Services (India) Ltd.", "CDSL", "CDSL: results for the quarter ended 30 September 2026", "the company: results for the quarter ended [date]"},
 		{"Mahindra & Mahindra Ltd.", "M&M", "Mahindra & Mahindra and M&M sign a deal", "the company and the company sign a deal"},
 		{"Birlasoft Ltd.", "BSOFT", "Birlasoft Q2 FY27 profit rises on 2026-10-04", "the company [quarter] [period] profit rises on [date]"},
+		{"Birlasoft Ltd.", "BSOFT", "Birlasoft Q3FY24 and H1FY25 results", "the company [quarter] [period] and [quarter] [period] results"},
 		{"Birlasoft Ltd.", "BSOFT", "Board meeting on October 12, 2026 and Monday 13/10/2026", "Board meeting on [date] and [day] [date]"},
 		{"Birlasoft Ltd.", "BSOFT", "Outcome of the meeting held in March 2026", "Outcome of the meeting held in [date]"},
 		// Amounts that look like years are not dates.
