@@ -1,6 +1,6 @@
 # Architecture
 
-jev-trader is a realtime NSE trading system written in Go. It reads Zerodha Kite market data, asks the Jev model for a decision on each closed bar, and passes every answer through a deterministic risk gate before an order can exist. Today it **paper trades only**: `--mode=live` cannot place orders ([docs/run-and-replay.md](docs/run-and-replay.md)). One binary, `jevtrader`, has the subcommands `login`, `screen`, `run`, `replay`, `backfill` and `version`; a second small command, `tradingday`, tells the scheduled workflow whether the NSE is open.
+jev-trader is a realtime NSE trading system written in Go. It reads Zerodha Kite market data, asks the Jev model for a decision on each closed bar, and passes every answer through a deterministic risk gate before an order can exist. Today it **paper trades only**: `--mode=live` cannot place orders ([docs/run-and-replay.md](docs/run-and-replay.md)). One binary, `jevtrader`, has the subcommands `login`, `screen`, `run`, `replay`, `backfill`, `shadow-report` and `version`; a second small command, `tradingday`, tells the scheduled workflow whether the NSE is open.
 
 This page is the map. The decisions behind it are in the reports, which it links rather than repeats:
 
@@ -72,7 +72,8 @@ flowchart LR
 | `internal/risk` | The deterministic gate: the only package that can mint the `Approval` the order manager requires. It also emits risk-driven exits and owns the kill switch and the capital budget. |
 | `internal/orders` | The order manager and the `Broker` interface; `paper` fills against the market-data stream, `kite` is the live broker that refuses while live trading is not approved in code. |
 | `internal/engine` | The single event loop that composes all of the above, including own-position rotation. |
-| `internal/decisionlog` | Append-only SQLite log of every cycle and order event; also the source for `recorded:` replays. |
+| `internal/decisionlog` | Append-only SQLite log of every cycle and order event; also the source for `recorded:` replays. It also holds the shadow signals of every candidate, traded or not, and their outcomes. |
+| `internal/shadow` | Fills the shadow signals' outcomes at fixed horizons from the recorded bars and summarises them (`jevtrader shadow-report`). |
 | `internal/clock` | Wall clock for `run`, simulated clock for `replay`. |
 | `internal/replay` | The replay runner, its report, the instrument-by-instrument walkthrough and the market comparison. |
 | `internal/screen`, `internal/universe`, `internal/news`, `internal/watchlist` | The pre-market picker: universe, news sources, signals and ranking, and the watchlist file format. |
@@ -160,6 +161,7 @@ flowchart TD
 
 Points the diagram compresses:
 
+- **Every signal is shadow-logged.** Beside each cycle row `run` writes a `shadow_signals` row (and one per picker entry at the start of the day), whether or not the gate let it trade. `shadow-report` fills what the market did at +15m, +60m, the window end and the day close from the recorded bars. See [docs/run-and-replay.md](docs/run-and-replay.md#the-shadow-log-and-jevtrader-shadow-report).
 - **The log comes before the order.** The cycle row (snapshot, answer, verdict, intent) is written before any order is submitted; an `order_events` row follows each broker update.
 - **Risk exits do not wait for a decider.** Square-off, the daily loss limit and the kill switch produce exits that are logged as cycles of their own.
 - **Trade for hours.** The defaults hold a position for at least an hour, wait an hour before re-entering a stock, and enter only on a call of at least 0.70 repeated on two consecutive decisions, five minutes apart. Stops, the square-off and the kill switch are never delayed by any of it. See [docs/run-and-replay.md](docs/run-and-replay.md#trading-for-hours).

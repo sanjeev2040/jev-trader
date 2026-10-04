@@ -3,6 +3,8 @@
 Both subcommands build the same engine (`internal/engine`) from different
 edges, as described in [reports/0002-architecture.md](../reports/0002-architecture.md).
 
+`jevtrader shadow-report` reads what `run` logged about every signal, traded or not: see [the shadow log](#the-shadow-log-and-jevtrader-shadow-report).
+
 `jevtrader screen` runs before either: it writes the day's [watchlist file](#jevtrader-screen) that `run` and `replay` can read. `jevtrader study` runs screen, backfill and replay over many past days and aggregates them: see [picker-study.md](picker-study.md).
 
 | | `run` | `replay` |
@@ -47,6 +49,8 @@ Paper trading on live data. The Jev decider uses the pinned model `jev-1.13.0` u
 watchlist (and the `NSE:NIFTY 50` index, used only as snapshot context),
 records ticks and closed bars under `--data-dir`, and writes every decision
 cycle to the SQLite decision log (`--log`, default `state/decisions.db`).
+It also shadow-logs every candidate signal, traded or not (`--shadow`, on by
+default; see [the shadow log](#the-shadow-log-and-jevtrader-shadow-report)).
 Creating a `KILL` file in the state directory, or sending `SIGUSR1`, trips the
 kill switch.
 
@@ -256,9 +260,77 @@ A replay of a past day is an optimistic upper bound: Jev may have seen that peri
 
 `internal/decisionlog` is append-only (triggers reject `UPDATE` and `DELETE`).
 Tables: `runs`, `cycles` (snapshot, answer, risk verdict, intent; written
-before the order is submitted), `order_events` (one per broker update) and
-`equity`. Open it with any SQLite client; WAL mode allows reading while a run
-is writing.
+before the order is submitted), `order_events` (one per broker update),
+`equity`, and the two [shadow tables](#the-shadow-log-and-jevtrader-shadow-report),
+`shadow_signals` and `shadow_outcomes`. Open it with any SQLite client; WAL
+mode allows reading while a run is writing.
+
+The schema version is in `PRAGMA user_version` (now 2). A log written at
+version 1 opens with this binary and is migrated in one transaction: the two
+shadow tables are added and nothing already in it is touched. A binary older
+than the migration refuses a migrated log rather than guess, so roll the log
+back from the Blob Storage backup if the image is rolled back.
+
+## The shadow log and `jevtrader shadow-report`
+
+The capital budget (₹25,000) decides which signals the bot can act on, and it
+cannot resolve an edge of the size at stake in under a year. Per-event returns
+can, so `run` also logs **every candidate signal**, whether or not it was
+traded, and the report reads what the market did after each. Nothing in the
+shadow log can change what is decided or ordered: it only writes, a failed
+write is logged and counted (`ShadowErrors` in the engine's stats) and the run
+goes on, and `replay` and `study` do not write it.
+
+What is logged, in `shadow_signals`:
+
+| Signal | When | Fields |
+| --- | --- | --- |
+| `pick` | the first decision bar of the day, once per picker entry in the watchlist file | rank, score, the screen's signals and the most material news item's Jev scores (impact, material, direction), as JSON in `detail`; counts from the first moment the gate allows an entry (09:20 by default) |
+| `decision:BUY`, `decision:SELL`, `decision:HOLD` | every decider answer, beside its `cycles` row | the answer's probability, the risk gate's verdict and detail (`approved`, `below_threshold`, `short_not_allowed`, ...) and whether an order was approved (`traded`) |
+| `decision:FAILED` | a decider error or timeout, which becomes a HOLD | as above; it is not an answer, so it has its own label |
+
+Each signal carries its time, the price when known, the end of the trading
+window (where entries stop, 15:00 by default) and the index the run watched. A
+signal for the same day, kind, instrument and time is logged once, so a restart
+the same day does not repeat the picks.
+
+**Outcomes** are one `shadow_outcomes` row per signal and horizon, appended
+later from the recorded bars (`--data-dir`, live `bars` first, then
+`bars_backfill`): the stock's move from the signal's price to the close of the
+last bar at or before **+15 minutes, +60 minutes, the window end and the day
+close (15:30)**, with the index's move and the mean move of the day's screened
+universe over the same interval. A horizon past the day's close, or a window end
+that is not after the signal, does not apply. An illiquid stock keeps its last
+price until the target. A horizon the recorded bars do not reach yet is left
+for a later fill, so a backfill of a gap completes it.
+
+```
+jevtrader shadow-report --from 2026-10-05 --to 2026-10-30
+jevtrader shadow-report --from 2026-10-05 --to 2026-10-30 --benchmark universe --by-verdict --json
+```
+
+The command first writes the outcomes the bars now answer (`--fill=false` to
+only read), then prints, per signal and horizon:
+
+- **N** and **DAYS**: outcomes and the distinct trading days among them.
+- **MEAN %**: the mean **market-neutral** return in the direction the signal bet on, in percent: the stock's move minus the benchmark's, times +1 for a pick, a BUY and a HOLD (read as a rise) and −1 for a SELL. Positive means the signal was right on average.
+- **CI95 %**: the 95% interval from resampling **whole days** with replacement (2,000 resamples, `--resamples`, repeatable with `--seed`). Outcomes of one day share that day's market, so the day is the unit; with fewer than two days there is no interval.
+- **HIT %**: the share of outcomes above zero.
+
+Each decision signal is also split into `traded` and `not traded`
+(`--by-verdict` adds one row per gate verdict), and the header counts the
+outcomes still awaiting bars and those left out for want of a benchmark.
+
+`--benchmark` picks what a return is netted against:
+
+- `index` (default): the index the run watched over the same interval, `NSE:NIFTY 50` unless `run --index` says otherwise. Midcap 150 and Smallcap 250, which are what the picks come from, are not streamed by `run`, so they are not available.
+- `universe`: the mean move of every stock the day's signals were about, as recorded. This is the picker's own cross-section, so over all of a day's picks it is zero by construction; it separates signals from each other (a BUY from a HOLD), not from the picker's list.
+- `none`: the raw move.
+
+Run it weekly over the forward days only, and set it beside the historical
+result of `jevtrader study`. The VM stores the log and the bars, so any
+machine with a copy of both can run it.
+
 
 ## Runbook: screen, then paper-trade the screened list locally
 
