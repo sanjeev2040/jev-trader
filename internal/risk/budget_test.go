@@ -13,8 +13,8 @@ import (
 func budgetGate(t *testing.T, edit func(*Limits)) *Gate {
 	t.Helper()
 	l := DefaultLimits()
-	l.MinHold, l.ReentryCooldown, l.CostAware, l.EntryConfirmations, l.EntryMinProbability = 0, 0, false, 0, 0 // the budget tests trade freely; churn_test.go covers these
-	l.RotationMinHold = 5 * time.Minute                                                                        // the budget tests rotate after minutes, not an hour
+	l.MinHold, l.ReentryCooldown, l.CostAware, l.EntryConfirmations, l.EntryMinProbability, l.StopLossPct = 0, 0, false, 0, 0, 0 // the budget tests trade freely; churn_test.go covers these
+	l.RotationMinHold = 5 * time.Minute                                                                                          // the budget tests rotate after minutes, not an hour
 	if edit != nil {
 		edit(&l)
 	}

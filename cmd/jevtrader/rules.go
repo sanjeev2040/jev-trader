@@ -12,7 +12,8 @@ import (
 )
 
 // tradingRules are the flags that set how patiently the bot trades: how long
-// it holds, how sure it must be to enter and how often it decides (issue #53).
+// it holds, how sure it must be to enter and how often it decides (issue #53),
+// and the stop and time exit that cap how badly a position can go (issue #59).
 // run, replay and study register the same flags with the same defaults, so a
 // study of the defaults is a study of what run does.
 type tradingRules struct {
@@ -21,17 +22,23 @@ type tradingRules struct {
 	entryMinProb  float64
 	confirmations int
 	decideEvery   time.Duration
+	stopPct       float64 // percent, as typed: 2 is a 2% stop
+	stopRangeMult float64
+	maxHold       time.Duration
 }
 
 // addTradingRuleFlags registers the flags on fs.
 func addTradingRuleFlags(fs *flag.FlagSet) *tradingRules {
 	d := risk.DefaultLimits()
 	r := &tradingRules{}
-	fs.DurationVar(&r.minHold, "min-hold", d.MinHold, "least time a position is held before a decider's exit or a rotation may sell it, counted from its first entry; the square-off, the daily loss limit and the kill switch are never delayed; 0 turns it off")
+	fs.DurationVar(&r.minHold, "min-hold", d.MinHold, "least time a position is held before a decider's exit or a rotation may sell it, counted from its first entry; the stop, the time exit, the square-off, the daily loss limit and the kill switch are never delayed; 0 turns it off")
 	fs.DurationVar(&r.cooldown, "reentry-cooldown", d.ReentryCooldown, "how long after selling out of an instrument before the bot may open a new position in it; 0 turns it off")
 	fs.Float64Var(&r.entryMinProb, "entry-min-probability", d.EntryMinProbability, "least probability an entry (a BUY, or a SELL that opens a short) needs; exits keep the lower base threshold; 0 turns it off")
 	fs.IntVar(&r.confirmations, "entry-confirmations", d.EntryConfirmations, "consecutive decisions on an instrument that must choose the same BUY or SELL, each above the entry threshold, before it is acted on; 0 or 1 turns it off")
-	fs.DurationVar(&r.decideEvery, "decide-every", engine.DefaultDecideEvery, "how often each instrument is put to the decider, aligned to the clock (5m decides at 09:20, 09:25, ...); stops and exits do not wait for it; 1m decides on every bar")
+	fs.DurationVar(&r.decideEvery, "decide-every", engine.DefaultDecideEvery, "how often each instrument is put to the decider, aligned to the clock (5m decides at 09:20, 09:25, ...); the stop, the time exit and the other risk exits do not wait for it; 1m decides on every bar")
+	fs.Float64Var(&r.stopPct, "stop-pct", 100*d.StopLossPct, "per-position stop, in percent of the average price: a position that far under water is sold at once, however short its hold and whatever the decider says; 0 turns the fixed stop off")
+	fs.Float64Var(&r.stopRangeMult, "stop-range-mult", d.StopRangeMult, "widen the stop for a volatile stock: the stop distance is the larger of --stop-pct and this multiple of the stock's price range over the last 30 minutes, read when the position is opened; 0 turns it off")
+	fs.DurationVar(&r.maxHold, "max-hold", d.MaxHold, "longest a position is held, counted from its first entry; it is then sold whatever the decider says and however short the minimum hold; 0 means no time exit")
 	return r
 }
 
@@ -47,6 +54,15 @@ func (r *tradingRules) validate() error {
 	if r.confirmations < 0 {
 		errs = append(errs, errors.New("--entry-confirmations must not be negative"))
 	}
+	if math.IsNaN(r.stopPct) || r.stopPct < 0 || r.stopPct >= 100 {
+		errs = append(errs, errors.New("--stop-pct must be 0 (off) or a percent below 100"))
+	}
+	if math.IsNaN(r.stopRangeMult) || math.IsInf(r.stopRangeMult, 0) || r.stopRangeMult < 0 {
+		errs = append(errs, errors.New("--stop-range-mult must be 0 (off) or positive"))
+	}
+	if r.maxHold < 0 {
+		errs = append(errs, errors.New("--max-hold must not be negative"))
+	}
 	if r.decideEvery < time.Minute || r.decideEvery%time.Minute != 0 || (30*time.Minute)%r.decideEvery != 0 {
 		errs = append(errs, fmt.Errorf("--decide-every must be a whole number of minutes that divides 30m (1m, 2m, 3m, 5m, 6m, 10m, 15m or 30m), got %s", r.decideEvery))
 	}
@@ -60,11 +76,29 @@ func (r *tradingRules) apply(l risk.Limits) risk.Limits {
 	l.ReentryCooldown = r.cooldown
 	l.EntryMinProbability = r.entryMinProb
 	l.EntryConfirmations = r.confirmations
+	l.StopLossPct, l.StopRangeMult, l.MaxHold = r.stopPct/100, r.stopRangeMult, r.maxHold
 	return l
 }
 
 // String says what the rules are, for the log and the replay report.
 func (r *tradingRules) String() string {
-	return fmt.Sprintf("decide every %s; entry needs p >= %.2f on %d consecutive decisions; min hold %s; re-entry cooldown %s",
-		r.decideEvery, r.entryMinProb, max(r.confirmations, 1), r.minHold, r.cooldown)
+	return fmt.Sprintf("decide every %s; entry needs p >= %.2f on %d consecutive decisions; min hold %s; re-entry cooldown %s; %s",
+		r.decideEvery, r.entryMinProb, max(r.confirmations, 1), r.minHold, r.cooldown, r.exitText())
+}
+
+// exitText says what the stop and the time exit are, for String.
+func (r *tradingRules) exitText() string {
+	stop := "no stop"
+	switch {
+	case r.stopPct > 0 && r.stopRangeMult > 0:
+		stop = fmt.Sprintf("stop at the larger of %g%% and %g x the 30m range", r.stopPct, r.stopRangeMult)
+	case r.stopPct > 0:
+		stop = fmt.Sprintf("stop %g%%", r.stopPct)
+	case r.stopRangeMult > 0:
+		stop = fmt.Sprintf("stop %g x the 30m range", r.stopRangeMult)
+	}
+	if r.maxHold > 0 {
+		return fmt.Sprintf("%s; time exit after %s", stop, r.maxHold)
+	}
+	return stop + "; no time exit"
 }

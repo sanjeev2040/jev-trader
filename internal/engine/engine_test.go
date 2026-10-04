@@ -82,7 +82,7 @@ type rig struct {
 // churn checks are off: these tests trade minutes apart on purpose.
 func testLimits() risk.Limits {
 	l := risk.DefaultLimits()
-	l.MinHold, l.ReentryCooldown, l.CostAware, l.EntryConfirmations, l.EntryMinProbability = 0, 0, false, 0, 0
+	l.MinHold, l.ReentryCooldown, l.CostAware, l.EntryConfirmations, l.EntryMinProbability, l.StopLossPct = 0, 0, false, 0, 0, 0
 	l.CapitalBudget = 200_000
 	l.SizeFraction[domain.SizeS] = 0.05
 	return l

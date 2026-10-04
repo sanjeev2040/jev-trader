@@ -36,10 +36,12 @@ type Book struct {
 	killReason Reason
 }
 
-// entry records when a position was opened and how sure the decider was.
+// entry records when a position was opened, how sure the decider was and how
+// far from its average price its stop sits.
 type entry struct {
 	probability float64
 	at          time.Time
+	stop        float64 // stop distance as a fraction of the average price, fixed at the first entry; 0 is no stop
 }
 
 // streak is the run of consecutive decisions on an instrument that chose the
@@ -346,15 +348,16 @@ func (b *Book) pruneOrders(now time.Time) {
 }
 
 // noteEntry records the decision that opened or added to a position. The
-// first entry sets the time and later ones keep the lowest probability, so a
-// position is only as strongly held as its weakest entry.
-func (b *Book) noteEntry(token uint32, probability float64, now time.Time) {
+// first entry sets the time and the stop distance, and later ones keep the
+// lowest probability, so a position is only as strongly held as its weakest
+// entry.
+func (b *Book) noteEntry(token uint32, probability, stop float64, now time.Time) {
 	if e, ok := b.entries[token]; ok {
 		e.probability = min(e.probability, probability)
 		b.entries[token] = e
 		return
 	}
-	b.entries[token] = entry{probability: probability, at: now}
+	b.entries[token] = entry{probability: probability, at: now, stop: stop}
 }
 
 // Committed returns the capital at work, in rupees: the cost of the
