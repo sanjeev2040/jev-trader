@@ -19,6 +19,10 @@ type Meta struct {
 	Generated time.Time
 	// Horizon is the bars ahead a BUY or SELL is scored for calibration.
 	Horizon int
+	// CostPct is the round-trip cost of a long position, in percent of the
+	// entry (charges and slippage), for the market-neutral tables' "after
+	// costs" column; zero leaves the column out.
+	CostPct float64
 }
 
 // Limitations are the things about a past-day study that make it differ from
@@ -27,9 +31,9 @@ var Limitations = []string{
 	"**Index constituents are today's.** NSE publishes the Midcap 150 and Smallcap 250 lists as they are now. A stock that has since left, or joined, is treated as in or out on every past day; delisted and renamed stocks are missing from Kite's instrument master and cannot be studied at all (survivorship). Their ASM/GSM status is today's too.",
 	"**There is no pre-open gap on a past day.** The call auction left no quote to read, so the gap signal is absent and its weight is spread over the rest (reports/0004-watchlist.md). The sectoral-index move is absent for the same reason: a sector's strength rests on the previous session's returns alone. The live picker's final pass sees more than the picker studied here.",
 	"**News is NSE filings only.** The RSS feeds keep no history. The live picker also reads five business-news feeds, so the news signal here is thinner than live.",
-	"**The model may have seen these days.** Jev's training cutoff is unknown, so a replay over a past period is an optimistic upper bound for Jev, not evidence of an edge. Forward paper trading is the deciding evidence. The picker's own signals are not affected by this.",
+	"**The model may have seen these days.** Jev's training cutoff is unknown, so a replay over a past period is an optimistic upper bound for Jev, not evidence of an edge. Forward paper trading is the deciding evidence. The news scores are exposed to it too (the request names the company and the date): run with `--anonymize-news` and compare the news tables to see how much of the news signal survives without them.",
 	"**Minute candles, not the order book.** Orders fill on minute candles after the decision latency, with the paper broker's costs; real fills in small and mid caps, which are thin in the first minutes after the open, will be worse.",
-	"**Few days, correlated stocks.** The stocks of one day share the market's move, so the effective sample is closer to the number of days than to the number of stock-days, and the t statistics (which treat days as independent) flatter. Read a difference as evidence only when it is large against its spread and has the same sign on most days.",
+	"**Few days, correlated stocks.** The stocks of one day share the market's move, so the effective sample is closer to the number of days than to the number of stock-days, and the t statistics (which treat days as independent) flatter. The market-neutral intervals resample days, so they do not; read a difference as evidence only when its interval excludes zero and it has the same sign in most weeks.",
 	"**Buy-and-hold deploys a fixed amount per name** (the size-M notional, a tenth of the budget) in every name of the list, which is far more than the budget the deciders trade with. Compare lists by mean return where the amounts differ; compare deciders with buy-and-hold by net P&L only as the same-sized-position benchmark the replay command uses.",
 }
 
@@ -110,6 +114,9 @@ func WriteMarkdown(w io.Writer, s Summary, meta Meta) error {
 		}
 	}
 
+	// 1b. Market-neutral.
+	writeNeutral(m, s, meta)
+
 	// 2. Is it better than chance?
 	if len(s.Paired) > 0 {
 		m.f("## Against buy-and-hold and against a random list\n\n")
@@ -150,10 +157,96 @@ func WriteMarkdown(w io.Writer, s Summary, meta Meta) error {
 
 	// 7. Cost.
 	writeCost(m, s)
+	writeNewsGaps(m, s)
 
 	writeSkipped(m, s)
 	writeLimitations(m)
 	return m.err
+}
+
+func writeNeutral(m *mdWriter, s Summary, meta Meta) {
+	n := s.Neutral
+	m.f("## Market-neutral evidence\n\n")
+	m.f("A stock's raw return is mostly the market's day. The **excess** return is the stock's return minus the mean of its day's cross-section over the same window (the same minutes): %s. Means pool the stock-days; the **95%% interval** resamples whole days (%d draws, seeded), because the stocks of one day share the market and are not independent. **Weeks positive** counts the calendar weeks whose mean excess was above zero. A mean whose interval includes zero is not evidence.\n\n", benchmarkText(n), bootstrapDraws)
+	if n.ExcludedDays > 0 {
+		m.f("%d day(s) had fewer than %d stocks for a cross-section and are left out of this section.\n\n", n.ExcludedDays, minBenchmark)
+	}
+	if len(n.BenchmarkDays) == 0 {
+		m.f("No day had a cross-section.\n\n")
+		return
+	}
+	table := func(rows []NeutralRow, day bool) {
+		cols := []string{"Group", "Stock-days", "Days", "Mean return", "Mean excess", "95% interval", "Weeks positive"}
+		if meta.CostPct > 0 {
+			cols = append(cols, "Long, excess after costs")
+		}
+		m.header(cols...)
+		for _, r := range rows {
+			me := r.Window
+			if day {
+				me = r.Day
+			}
+			if me.N == 0 {
+				m.row(r.Name, "0", "0", "n/a", "n/a", "n/a", "n/a")
+				continue
+			}
+			row := []string{r.Name, fmt.Sprint(me.N), fmt.Sprint(me.Days), signedPct(me.MeanRaw), signedPct(me.Mean), interval(me.CI), fmt.Sprintf("%d/%d", me.PositiveWeeks, me.Weeks)}
+			if meta.CostPct > 0 {
+				row = append(row, signedPct(me.Mean-meta.CostPct))
+			}
+			m.row(row...)
+		}
+		m.f("\n")
+	}
+	m.f("**Picks and the random list, over the window** (open of its first bar to close of its last):\n\n")
+	table(n.Lists, false)
+	m.f("**Picks and the random list, to the day's close:**\n\n")
+	table(n.Lists, true)
+
+	m.f("### The news signal\n\n")
+	if n.Universe {
+		m.f("Every screened stock-day, not only the picks, grouped by the sign of its net news signal that morning (Jev's score of the items about it, aged and summed; negative news included). \"Scored, net zero\" had items that cancelled; \"no scored news item\" is most of the pool. The last row is the day-by-day difference of the two groups' mean excess, over the days that had both; its `Stock-days` are days.\n\n")
+	} else {
+		m.f("Only the stocks the study measured (the picks and the random list), grouped by the sign of their net news signal that morning. Run with `--universe` to measure every screened stock and read the signal over the whole pool, negative news included. The last row is the day-by-day difference of the two groups' mean excess, over the days that had both; its `Stock-days` are days.\n\n")
+	}
+	m.f("*Over the window:*\n\n")
+	table(append(slices.Clone(n.News), n.Spread), false)
+	m.f("*To the day's close:*\n\n")
+	table(append(slices.Clone(n.News), n.Spread), true)
+
+	if len(n.Weeks) > 0 {
+		m.f("### Week by week\n\n")
+		m.f("Mean excess over the window by calendar week (the Monday), with the stock-days behind it: is the effect in most weeks, or in a few?\n\n")
+		m.header("Week of", "Days", "Picks", "News above 0", "News below 0")
+		for _, w := range n.Weeks {
+			m.row(w.Week, fmt.Sprint(w.Days), weekCell(w.Picks), weekCell(w.Positive), weekCell(w.Negative))
+		}
+		m.f("\n")
+	}
+}
+
+func benchmarkText(n Neutral) string {
+	var parts []string
+	for _, k := range []string{BenchmarkPool, BenchmarkRandom, BenchmarkStudied} {
+		if c := n.BenchmarkDays[k]; c > 0 {
+			parts = append(parts, fmt.Sprintf("%s on %d day(s)", k, c))
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+func interval(i Interval) string {
+	if !i.OK {
+		return fmt.Sprintf("n/a (under %d days)", minCIDays)
+	}
+	return fmt.Sprintf("%s to %s", signedPct(i.Lo), signedPct(i.Hi))
+}
+
+func weekCell(c WeekCell) string {
+	if c.N == 0 {
+		return "–"
+	}
+	return fmt.Sprintf("%s (%d)", signedPct(c.Mean), c.N)
 }
 
 func perDay(total float64, days int) float64 {
@@ -243,20 +336,24 @@ func writeCalibration(m *mdWriter, s Summary, meta Meta) {
 
 func writeSignals(m *mdWriter, s Summary) {
 	m.f("## Which signals went with the window return\n\n")
-	m.f("Each signal of the morning's screen (in [-1, 1]) against the stock's return from the window's open to its close. `r` is Pearson and `ρ` Spearman over all stock-days; `daily IC` is the mean over days of that day's rank correlation (days with at least %d stocks), with its t. The last columns are the mean return and count of the stocks whose signal was above zero, below zero, and zero or not read. The gap signal is absent on past days.\n\n", minDailyNames)
+	m.f("Each signal of the morning's screen (in [-1, 1]) against the stock's return from the window's open to its close. `r` is Pearson and `ρ` Spearman over all stock-days; `daily IC` is the mean over days of that day's rank correlation (days with at least %d stocks), with its t and its 95%% interval resampling days. The last columns are the mean return and count of the stocks whose signal was above zero, below zero, and zero or not read. The gap signal is absent on past days.\n\n", minDailyNames)
 	for _, population := range []string{"all studied stocks", "picks"} {
 		if population == "picks" {
 			m.f("Picks only (the population the live bot trades):\n\n")
 		} else {
-			m.f("Picks and the random list together (the picks are a selection from the pool, so this population has both ends of the score):\n\n")
+			if s.Neutral.Universe {
+				m.f("Every stock measured (the whole screened pool, the picks and the random list included):\n\n")
+			} else {
+				m.f("Picks and the random list together (the picks are a selection from the pool, so this population has both ends of the score):\n\n")
+			}
 		}
-		m.header("Signal", "Stock-days", "r", "ρ", "Daily IC", "IC days", "IC t", "Above 0", "Below 0", "Zero / not read")
+		m.header("Signal", "Stock-days", "r", "ρ", "Daily IC", "IC 95% interval", "IC days", "IC t", "Above 0", "Below 0", "Zero / not read")
 		for _, st := range s.Signals {
 			if st.Population != population {
 				continue
 			}
 			if st.N == 0 {
-				m.row(st.Signal, "0", "n/a", "n/a", "n/a", "0", "n/a", bucket(st.Above), bucket(st.Below), bucket(st.None))
+				m.row(st.Signal, "0", "n/a", "n/a", "n/a", "n/a", "0", "n/a", bucket(st.Above), bucket(st.Below), bucket(st.None))
 				continue
 			}
 			r, rho := "n/a", "n/a"
@@ -267,7 +364,11 @@ func writeSignals(m *mdWriter, s Summary) {
 			if st.ICDays > 0 {
 				ic, ict = fmt.Sprintf("%+.3f", st.MeanDailyIC), fmt.Sprintf("%+.2f", st.ICT)
 			}
-			m.row(st.Signal, fmt.Sprint(st.N), r, rho, ic, fmt.Sprint(st.ICDays), ict, bucket(st.Above), bucket(st.Below), bucket(st.None))
+			ici := "n/a"
+			if st.ICCI.OK {
+				ici = fmt.Sprintf("%+.3f to %+.3f", st.ICCI.Lo, st.ICCI.Hi)
+			}
+			m.row(st.Signal, fmt.Sprint(st.N), r, rho, ic, ici, fmt.Sprint(st.ICDays), ict, bucket(st.Above), bucket(st.Below), bucket(st.None))
 		}
 		m.f("\n")
 	}
@@ -288,6 +389,18 @@ func writeCost(m *mdWriter, s Summary) {
 	m.row("Decisions, answered from the store", fmt.Sprint(u.CacheHits), fmt.Sprint(u.SavedInputTokens), fmt.Sprint(u.SavedOutputTokens), usd(u.SavedInputTokens)+" saved")
 	m.row("News scoring in the screens", "", fmt.Sprint(s.ScreenInputTokens), fmt.Sprint(s.ScreenOutputTokens), usd(s.ScreenInputTokens))
 	m.f("\nList price is $42 per billion input tokens, output free (jev-1.13.0). Paid counts what the run that computed each day was billed; a rerun answers from the store and costs nothing, and a day that was already stored is not asked again.\n\n")
+}
+
+func writeNewsGaps(m *mdWriter, s Summary) {
+	if len(s.NewsGaps) == 0 {
+		return
+	}
+	m.f("## News scoring gaps\n\n")
+	m.f("Jev failed on some news items on these days (a rate limit or an outage that outlasted the retries), so their news signal is incomplete. The items it did score are stored: run again with `--refresh` and only the ones that failed are asked.\n\n")
+	for _, g := range s.NewsGaps {
+		m.f("- %s\n", g)
+	}
+	m.f("\n")
 }
 
 func usd(inputTokens int) string {

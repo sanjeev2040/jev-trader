@@ -60,7 +60,9 @@ func (k *Kite) Daily(ctx context.Context, key string, from, to time.Time) ([]Can
 	if err := k.historical.Wait(ctx); err != nil {
 		return nil, err
 	}
-	data, err := k.API.GetHistoricalData(int(token), "day", from, to, false, false)
+	data, err := Retry(ctx, RetryAttempts, RetryBackoff, func() ([]kiteconnect.HistoricalData, error) {
+		return k.API.GetHistoricalData(int(token), "day", from, to, false, false)
+	})
 	if err != nil {
 		return nil, classify(key, err)
 	}

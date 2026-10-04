@@ -3,6 +3,7 @@ package study
 import (
 	"math"
 	"slices"
+	"strings"
 
 	"github.com/sanjeev2040/jev-trader/internal/replay"
 	"github.com/sanjeev2040/jev-trader/internal/screen"
@@ -40,6 +41,15 @@ type Summary struct {
 	Calls []CallsSummary
 	// Signals relate each signal to the window return of the studied stocks.
 	Signals []SignalStat
+	// Neutral is the market-neutral evidence: excess returns over the day's
+	// cross-section, with day-resampled intervals and per-week consistency,
+	// and the news signal over every measured stock.
+	Neutral Neutral
+
+	// NewsGaps are the days whose news scoring lost items to Jev failures
+	// (their scores are stored as they were; a rerun with Refresh asks again
+	// for only what failed), as "date: the screen's note".
+	NewsGaps []string
 
 	Usage              Usage
 	ScreenInputTokens  int
@@ -121,6 +131,8 @@ type SignalStat struct {
 	MeanDailyIC float64
 	ICDays      int
 	ICT         float64
+	// ICCI is the 95% interval of the mean daily IC, resampling days.
+	ICCI Interval
 	// Above, Below and None are the mean return and count of the stocks whose
 	// signal was above zero, below zero, and zero or not read.
 	Above, Below, None Bucket
@@ -151,6 +163,11 @@ func Summarize(from, to string, days []DayResult) Summary {
 		s.Usage.Add(d.Jev)
 		s.ScreenInputTokens += d.ScreenInputTokens
 		s.ScreenOutputTokens += d.ScreenOutputTokens
+		for _, n := range d.Notes {
+			if strings.HasPrefix(n, "Jev failed on ") || strings.HasPrefix(n, "Jev could not score") {
+				s.NewsGaps = append(s.NewsGaps, d.Date+": "+n)
+			}
+		}
 	}
 	s.Picks = summarizeList(picks)
 	var randoms []ListResult
@@ -165,6 +182,7 @@ func Summarize(from, to string, days []DayResult) Summary {
 	s.Paired = pairs(ok, s.Deciders)
 	s.Calibration, s.Calls = calibration(picks)
 	s.Signals = signalStats(ok)
+	s.Neutral = summarizeNeutral(ok)
 	return s
 }
 
@@ -415,7 +433,7 @@ func signalStat(days []DayResult, name, population string) SignalStat {
 	var ics []float64
 	for _, d := range days {
 		var dx, dy []float64
-		for _, s := range d.Stocks {
+		for _, s := range dayStocks(d) {
 			if population == "picks" && !s.Picked {
 				continue
 			}
@@ -443,7 +461,7 @@ func signalStat(days []DayResult, name, population string) SignalStat {
 	st.N = len(xs)
 	st.Pearson, st.HasCorr = pearson(xs, ys)
 	st.Spearman, _ = spearman(xs, ys)
-	st.MeanDailyIC, st.ICDays, st.ICT = mean(ics), len(ics), tStat(ics)
+	st.MeanDailyIC, st.ICDays, st.ICT, st.ICCI = mean(ics), len(ics), tStat(ics), meanCI(ics)
 	st.Above = Bucket{len(above), mean(above)}
 	st.Below = Bucket{len(below), mean(below)}
 	st.None = Bucket{len(none), mean(none)}

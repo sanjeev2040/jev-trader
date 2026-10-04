@@ -75,6 +75,9 @@ type studyOptions struct {
 	horizon                                             int
 	lookahead                                           []time.Duration
 	logPath                                             string
+	// jevRate is the most Jev calls a second (news scoring and decisions);
+	// 0 is no limit.
+	jevRate float64
 }
 
 // buildStudyDeps connects the study to Kite, the news sources and Jev. Tests
@@ -119,6 +122,10 @@ func studyCmd(ctx context.Context, args []string, e env) error {
 	catDirection := fs.Float64("catalyst-direction", def.Catalyst.MinDirection, "least Jev direction (P(up) - P(down), 0..1) of a catalyst item")
 	catImpact := fs.Float64("catalyst-impact", def.Catalyst.MinImpact, "least Jev impact level (0 none, 1 under 1%, 2 about 1-2%, 3 about 2-4%, 4 over 4%) of a catalyst item")
 	minScore := fs.Float64("min-score", def.MinScore, "least score a pick needs")
+	maxNews := fs.Int("max-news", def.MaxNewsItems, "most (news item, company) pairs Jev scores per day; raise it (600 or more) with --universe, where every screened stock's news counts")
+	anonymize := fs.Bool("anonymize-news", false, "look-ahead control: hide the company's name, its symbol and every date from the text sent to Jev, so the news scores come from the wording alone. Run the same range with and without it and compare the news tables; the scores are cached apart")
+	universe := fs.Bool("universe", false, "measure every stock of the screened pool each day (hold-only: its return over the window and to the close), so the market-neutral benchmark is the whole pool and the news table covers every stock with a scored item, negative news included. Fetches the 1-minute candles of the whole pool (about 390 stocks a day)")
+	jevRate := fs.Float64("jev-rate", 10, "most Jev calls a second, for the news scoring and the decisions that are not answered from the store; 0 for no limit")
 	sources := fs.String("news-sources", "all", `news sources, as for screen; RSS feeds keep no history, so a past day reads NSE filings only`)
 	model := fs.String("model", jev.DefaultModel, "pinned Jev model id (\"jev-latest\" is rejected)")
 	jevURL := fs.String("jev-url", "", "Jev base URL (default: the public API)")
@@ -186,10 +193,14 @@ flags:`)
 	if *randomSize < 0 {
 		return usageError{errors.New("--random-size must not be negative")}
 	}
+	if *jevRate < 0 {
+		return usageError{errors.New("--jev-rate must not be negative")}
+	}
 
 	cfg := def
 	cfg.Phase = watchlist.PhaseHistoric
 	cfg.TopN, cfg.MaxPerSector, cfg.MinScore = *top, *maxPerSector, *minScore
+	cfg.MaxNewsItems, cfg.AnonymizeNews = *maxNews, *anonymize
 	cfg.Weights = screen.Weights{News: *wNews, Sector: *wSector, Gap: *wGap, Range: *wRange}
 	cfg.Catalyst = screen.Catalyst{Require: *requireCatalyst, MinMaterial: *catMaterial, MinDirection: *catDirection, MinImpact: *catImpact}
 	cfg.CacheDir, cfg.KeepPool = *dataDir, true
@@ -220,13 +231,13 @@ flags:`)
 		randomN = -1
 		rnames = nil
 	}
-	screenKey := fingerprint("screen/v2", cfg.TopN, cfg.MaxPerSector, cfg.MinScore, cfg.Weights, cfg.Catalyst, cfg.Filters, cfg.NewsWindow, cfg.MaxNewsItems, srcNames, *model)
-	runKey := fingerprint("run/v2", screenKey, *start, *end, names, rnames, randomN, *seed, capital.Amount, rules.String(), *latency, *horizon, horizons, *model)
+	screenKey := fingerprint("screen/v3", cfg.TopN, cfg.MaxPerSector, cfg.MinScore, cfg.Weights, cfg.Catalyst, cfg.Filters, cfg.NewsWindow, cfg.MaxNewsItems, cfg.AnonymizeNews, srcNames, *model)
+	runKey := fingerprint("run/v3", screenKey, *start, *end, names, rnames, randomN, *seed, *universe, capital.Amount, rules.String(), *latency, *horizon, horizons, *model)
 
 	sc := study.Config{
 		From: first.Format(time.DateOnly), To: last.Format(time.DateOnly), Dir: studyDir, Calendar: cal,
 		RandomN: randomN, Seed: *seed, PickDeciders: names, RandomDeciders: rnames,
-		ScreenKey: screenKey, RunKey: runKey, Refresh: *refresh, CachedOnly: *reportOnly,
+		ScreenKey: screenKey, RunKey: runKey, Refresh: *refresh, CachedOnly: *reportOnly, Universe: *universe,
 		Logger: slog.New(slog.NewTextHandler(e.stderr, nil)),
 	}
 	var deps study.Deps
@@ -235,7 +246,7 @@ flags:`)
 			dataDir: *dataDir, studyDir: studyDir, stateDir: *stateDir, kiteURL: lookup(e, "KITE_API_BASE_URL"),
 			jevURL: *jevURL, model: *model, first: first, last: last, screen: cfg, sources: srcNames,
 			window: window, capital: capital, rules: rules, deciders: append(slices.Clone(names), rnames...), latency: *latency, decideTimeout: *decideTimeout,
-			horizon: *horizon, lookahead: horizons, logPath: *logPath,
+			horizon: *horizon, lookahead: horizons, logPath: *logPath, jevRate: *jevRate,
 		}, sc.Logger)
 		if err != nil {
 			return err
@@ -252,7 +263,10 @@ flags:`)
 		fmt.Fprintf(e.stderr, "jevtrader study: stopped: %v\nThe %d day(s) done are stored; run again to resume, or add --report-only for a report of them.\n", runErr, len(results))
 	}
 	summary := study.Summarize(sc.From, sc.To, results)
-	meta := study.Meta{Generated: time.Now(), Horizon: *horizon, Settings: studySettings(sc, cfg, srcNames, *start, *end, *model, capital, rules, *latency, horizons)}
+	meta := study.Meta{
+		Generated: time.Now(), Horizon: *horizon, CostPct: roundTripCostPct(buyHoldNotional(tradingLimits(capital, rules)), paper.DefaultConfig()),
+		Settings: studySettings(sc, cfg, srcNames, *start, *end, *model, capital, rules, *latency, horizons),
+	}
 	if err := writeStudyReport(e, *out, studyDir, summary, meta); err != nil {
 		return err
 	}
@@ -337,6 +351,8 @@ func studySettings(sc study.Config, cfg screen.Config, sources []string, start, 
 		{"Days", sc.From + " to " + sc.To},
 		{"Window", fmt.Sprintf("%s–%s IST", start, end)},
 		{"Picker", fmt.Sprintf("top %d, at most %d a sector, minimum score %.2f, weights news %.2f sector %.2f gap %.2f range %.2f (the gap is absent on past days), news catalyst %s, news from %s", cfg.TopN, cfg.MaxPerSector, cfg.MinScore, w.News, w.Sector, w.Gap, w.Range, catalyst, strings.Join(sources, ", "))},
+		{"News scoring", newsScoring(cfg)},
+		{"Stocks measured", measured(sc)},
 		{"Deciders on the picks", strings.Join(sc.PickDeciders, ", ")},
 		{"Random list", random},
 		{"Jev model", model},
@@ -346,6 +362,33 @@ func studySettings(sc study.Config, cfg screen.Config, sources []string, start, 
 		{"Candles", "Kite 1m historical candles (not tick-built bars)"},
 		{"Keys", "screen " + sc.ScreenKey + ", run " + sc.RunKey},
 	}
+}
+
+// roundTripCostPct is what buying and selling notional rupees of a stock costs
+// as a percent of the entry: the charges of both orders and the slippage of
+// each side, at a typical price.
+func roundTripCostPct(notional float64, p paper.Config) float64 {
+	const price = 100.0
+	qty := int64(notional / price)
+	if qty <= 0 {
+		return 0
+	}
+	charges := p.Costs.Charges(domain.ActionBuy, qty, price) + p.Costs.Charges(domain.ActionSell, qty, price)
+	return charges/(float64(qty)*price)*100 + 2*p.SlippageBps/100
+}
+
+func newsScoring(cfg screen.Config) string {
+	if cfg.AnonymizeNews {
+		return fmt.Sprintf("anonymised: the company's name and symbol and every date hidden from Jev (the look-ahead control); at most %d pairs a day", cfg.MaxNewsItems)
+	}
+	return fmt.Sprintf("named: the company and the publication time are sent to Jev; at most %d pairs a day", cfg.MaxNewsItems)
+}
+
+func measured(sc study.Config) string {
+	if sc.Universe {
+		return "the picks, the random list and every other stock of the screened pool (hold only), so the market-neutral benchmark is the whole pool"
+	}
+	return "the picks and the random list only; the market-neutral benchmark is the random list (--universe measures the whole pool)"
 }
 
 func writeStudyReport(e env, out, studyDir string, s study.Summary, meta study.Meta) error {
@@ -401,6 +444,9 @@ func realStudyDeps(ctx context.Context, e env, o studyOptions, logger *slog.Logg
 		return study.Deps{}, noop, err
 	}
 	sd.Market = study.NewRangeMarket(sd.Market, o.first, o.last, screen.DailyLookbackDays)
+	if sd.Jev != nil {
+		sd.Jev = screen.NewLimitedAsker(sd.Jev, o.jevRate)
+	}
 
 	var wanted []string
 	if slices.Contains(o.deciders, "jev") {
@@ -438,6 +484,9 @@ func realStudyDeps(ctx context.Context, e env, o studyOptions, logger *slog.Logg
 		byKey: byKey, index: index, log: logger,
 	}
 	rp := &studyReplayer{o: o, root: o.studyDir, byKey: byKey, index: index, log: log, answers: answers, secrets: secrets}
+	if o.jevRate > 0 {
+		rp.limiter = rate.NewLimiter(rate.Limit(o.jevRate), 1)
+	}
 	deps := study.Deps{
 		Screen: func(ctx context.Context, day string) (watchlist.File, error) {
 			cfg := o.screen
@@ -447,6 +496,7 @@ func realStudyDeps(ctx context.Context, e env, o studyOptions, logger *slog.Logg
 		},
 		Backfill: bf.fetch,
 		Replay:   rp.replay,
+		Returns:  rp.returns,
 	}
 	return deps, release, nil
 }
@@ -570,6 +620,78 @@ type studyReplayer struct {
 	log     *decisionlog.Log
 	answers *study.AnswerStore
 	secrets config.Secrets
+	// limiter spaces the Jev calls that are paid for, across every replay.
+	limiter *rate.Limiter
+}
+
+// sessionOpen is the NSE session open, as an offset from IST midnight; the
+// window never opens before it.
+const sessionOpen = 9*time.Hour + 15*time.Minute
+
+// returns reads each key's return over the study window of the day from the
+// stored 1-minute candles, as the replay's buy-and-hold reads it (the open of
+// the window's first bar to the close of its last, and to the day's last
+// close), without running the engine. A key with no bar in the window is left
+// out.
+func (r *studyReplayer) returns(_ context.Context, day string, keys []string) (map[string]study.Return, error) {
+	date, err := time.ParseInLocation(time.DateOnly, day, ist)
+	if err != nil {
+		return nil, err
+	}
+	byToken := make(map[uint32]string, len(keys))
+	tokens := make([]uint32, 0, len(keys))
+	for _, k := range keys {
+		in, ok := r.byKey[k]
+		if !ok {
+			return nil, fmt.Errorf("%s is not in the instrument master", k)
+		}
+		byToken[in.Token] = k
+		tokens = append(tokens, in.Token)
+	}
+	start := date.Add(max(r.o.window.Start, sessionOpen))
+	end := date.AddDate(0, 0, 1)
+	if r.o.window.End != 0 {
+		end = date.Add(r.o.window.End)
+	}
+	type span struct {
+		first, last *domain.Bar
+		dayClose    float64
+	}
+	spans := make(map[uint32]*span, len(keys))
+	err = store.ScanBars(r.root, store.KindBackfill, store.BarQuery{Query: store.Query{From: date, To: date.AddDate(0, 0, 1), Tokens: tokens}, Interval: time.Minute}, func(b domain.Bar) error {
+		sp := spans[b.Instrument.Token]
+		if sp == nil {
+			sp = &span{}
+			spans[b.Instrument.Token] = sp
+		}
+		sp.dayClose = b.Close
+		if !b.Start.Before(start) && !b.End.After(end) {
+			if sp.first == nil {
+				bar := b
+				sp.first = &bar
+			}
+			bar := b
+			sp.last = &bar
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]study.Return, len(spans))
+	for token, sp := range spans {
+		if sp.first == nil || sp.first.Open <= 0 {
+			continue
+		}
+		open := sp.first.Open
+		ret := study.Return{WindowPct: (sp.last.Close - open) / open * 100}
+		if sp.dayClose > 0 {
+			v := (sp.dayClose - open) / open * 100
+			ret.DayPct = &v
+		}
+		out[byToken[token]] = ret
+	}
+	return out, nil
 }
 
 func (r *studyReplayer) replay(ctx context.Context, req study.ReplayRequest) (*replay.Report, study.Usage, error) {
@@ -605,7 +727,7 @@ func (r *studyReplayer) replay(ctx context.Context, req study.ReplayRequest) (*r
 		if err != nil {
 			return nil, study.Usage{}, err
 		}
-		cached = &study.CachedDecider{Inner: client, Model: r.o.model, Store: r.answers}
+		cached = &study.CachedDecider{Inner: client, Model: r.o.model, Store: r.answers, Limiter: r.limiter}
 		specs = append(specs, replay.Spec{Name: "jev", Decider: cached})
 	}
 	limits := tradingLimits(r.o.capital, r.o.rules)

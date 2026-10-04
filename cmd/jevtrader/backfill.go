@@ -20,6 +20,7 @@ import (
 	"github.com/sanjeev2040/jev-trader/internal/domain"
 	"github.com/sanjeev2040/jev-trader/internal/kiteauth"
 	kitemd "github.com/sanjeev2040/jev-trader/internal/marketdata/kite"
+	"github.com/sanjeev2040/jev-trader/internal/screen"
 	"github.com/sanjeev2040/jev-trader/internal/store"
 )
 
@@ -295,7 +296,9 @@ func (job backfillJob) fetchChunk(ctx context.Context, kite historian, limiter *
 		if err := limiter.Wait(ctx); err != nil {
 			return nil, err
 		}
-		candles, err := kite.GetHistoricalData(int(token), "minute", from, to, false, false)
+		candles, err := screen.Retry(ctx, screen.RetryAttempts, screen.RetryBackoff, func() ([]kiteconnect.HistoricalData, error) {
+			return kite.GetHistoricalData(int(token), "minute", from, to, false, false)
+		})
 		if err != nil {
 			return nil, fmt.Errorf("historical data for %d from %s: %w", token, from.Format(time.DateOnly), err)
 		}

@@ -27,7 +27,7 @@ import (
 )
 
 // ResultVersion is the version of a day's stored result.
-const ResultVersion = 1
+const ResultVersion = 2
 
 // Day statuses.
 const (
@@ -57,6 +57,19 @@ type Deps struct {
 	// Replay replays the day's window over the keys with the deciders, with
 	// the market comparison, and says what the Jev decider cost.
 	Replay func(ctx context.Context, req ReplayRequest) (*replay.Report, Usage, error)
+	// Returns reads what each key did over the day's window from the stored
+	// candles, without a replay. It is called only when Config.Universe is on,
+	// for the screened stocks that are neither picked nor in the random list;
+	// a key it has no candles for is left out of the answer.
+	Returns func(ctx context.Context, day string, keys []string) (map[string]Return, error)
+}
+
+// Return is what one stock did over the study window of a day, in percent:
+// from the open of the window's first bar to the close of its last, and from
+// that open to the day's close.
+type Return struct {
+	WindowPct float64
+	DayPct    *float64
 }
 
 // ReplayRequest is one replay of a day.
@@ -75,6 +88,12 @@ type Config struct {
 	Dir string
 	// Calendar says which days trade; nil means every weekday does.
 	Calendar *nsecal.Calendar
+	// Universe measures every stock of the screened pool each day (the
+	// deciders still trade the picks and the random list only): the
+	// market-neutral benchmark is then the pool's cross-section at the same
+	// window, and the news signal is read on every stock with a scored item. It
+	// needs Deps.Returns, and the 1-minute candles of the whole pool.
+	Universe bool
 	// RandomN is how many stocks the random list holds; 0 means as many as
 	// the day's picks, and a negative number leaves the random list out.
 	RandomN int
@@ -203,7 +222,7 @@ func runDay(ctx context.Context, cfg Config, deps Deps, day string) (DayResult, 
 		return skipped(day, "screen: "+err.Error()), nil
 	}
 	picks := wl.Keys()
-	if len(picks) == 0 {
+	if len(picks) == 0 && !cfg.Universe {
 		res := DayResult{Version: ResultVersion, Date: day, Status: StatusOK, Phase: wl.Phase, Notes: wl.Notes}
 		for _, s := range wl.Sources {
 			res.ScreenInputTokens += s.InputTokens
@@ -223,7 +242,19 @@ func runDay(ctx context.Context, cfg Config, deps Deps, day string) (DayResult, 
 	for _, p := range random {
 		keys = append(keys, p.Key)
 	}
-	missing, err := deps.Backfill(ctx, day, keys)
+	var rest []string // the pool's other stocks, measured only
+	if cfg.Universe {
+		if deps.Returns == nil {
+			return DayResult{}, errors.New("the study covers the whole pool but has no way to read returns")
+		}
+		for _, p := range wl.Pool {
+			if !slices.Contains(keys, p.Key) {
+				rest = append(rest, p.Key)
+			}
+		}
+		slices.Sort(rest)
+	}
+	missing, err := deps.Backfill(ctx, day, append(slices.Clone(keys), rest...))
 	if errors.Is(err, ErrNoData) {
 		return skipped(day, "Kite has no candles for the day"), nil
 	}
@@ -243,7 +274,7 @@ func runDay(ctx context.Context, cfg Config, deps Deps, day string) (DayResult, 
 	rank := map[string]int{}
 	for _, e := range wl.Entries {
 		rank[e.Key] = e.Rank
-		info[e.Key] = watchlist.PoolEntry{Key: e.Key, Sector: e.Sector, Score: e.Score, Signals: e.Signals}
+		info[e.Key] = watchlist.PoolEntry{Key: e.Key, Sector: e.Sector, Score: e.Score, Signals: e.Signals, NewsItems: info[e.Key].NewsItems}
 	}
 
 	lists := []struct {
@@ -291,7 +322,7 @@ func runDay(ctx context.Context, cfg Config, deps Deps, day string) (DayResult, 
 				pe := info[row.Instrument]
 				sd := StockDay{
 					Key: row.Instrument, Sector: pe.Sector, Picked: l.name == ListPicks, Rank: rank[row.Instrument],
-					Score: pe.Score, Signals: pe.Signals, ReturnPct: row.ReturnPct,
+					Score: pe.Score, Signals: pe.Signals, NewsItems: pe.NewsItems, ReturnPct: row.ReturnPct,
 				}
 				if row.DayClose != nil && row.StartPrice > 0 {
 					v := (*row.DayClose - row.StartPrice) / row.StartPrice * 100
@@ -304,6 +335,26 @@ func runDay(ctx context.Context, cfg Config, deps Deps, day string) (DayResult, 
 	if res.Picks.Names > 0 && res.Picks.BuyHold.NamesWithData == 0 {
 		return skipped(day, "no pick has candles"), nil
 	}
+	if len(rest) > 0 {
+		var measured []string
+		for _, k := range rest {
+			if !slices.Contains(missing, k) {
+				measured = append(measured, k)
+			}
+		}
+		got, err := deps.Returns(ctx, day, measured)
+		if err != nil {
+			return DayResult{}, fmt.Errorf("returns: %w", err)
+		}
+		for _, k := range measured {
+			r, ok := got[k]
+			if !ok {
+				continue
+			}
+			pe := info[k]
+			res.Pool = append(res.Pool, StockDay{Key: k, Sector: pe.Sector, Score: pe.Score, Signals: pe.Signals, NewsItems: pe.NewsItems, ReturnPct: r.WindowPct, DayReturnPct: r.DayPct})
+		}
+	}
 	return res, nil
 }
 
@@ -312,7 +363,7 @@ func runDay(ctx context.Context, cfg Config, deps Deps, day string) (DayResult, 
 func screenDay(ctx context.Context, cfg Config, deps Deps, day string) (watchlist.File, error) {
 	path := watchlist.Path(filepath.Join(cfg.Dir, "watchlist", cfg.ScreenKey), day)
 	if !cfg.Refresh {
-		if f, err := watchlist.Read(path); err == nil && (len(f.Pool) > 0 || cfg.RandomN < 0) {
+		if f, err := watchlist.Read(path); err == nil && (len(f.Pool) > 0 || (cfg.RandomN < 0 && !cfg.Universe)) {
 			return f, nil
 		}
 	}

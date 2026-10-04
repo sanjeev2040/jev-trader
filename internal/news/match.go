@@ -88,6 +88,42 @@ func NewMatcher(companies []Company) *Matcher {
 	return m
 }
 
+// NameTerms returns the ways news may write a company's name, longest first,
+// as lists of lower-case words: the registered name without its legal suffix,
+// that name with trailing generic words dropped one at a time, and each
+// remaining distinctive word on its own. Unlike the Matcher it keeps short and
+// common names, because its caller hides a company rather than finding it:
+// over-matching only removes more words.
+func NameTerms(name string) [][]string {
+	words := strings.Fields(normalize(name))
+	for len(words) > 1 && legalWords[words[len(words)-1]] {
+		words = words[:len(words)-1]
+	}
+	var out [][]string
+	seen := map[string]bool{}
+	add := func(ws []string) {
+		if len(ws) == 0 {
+			return
+		}
+		if k := strings.Join(ws, " "); !seen[k] {
+			seen[k] = true
+			out = append(out, ws)
+		}
+	}
+	add(words)
+	ws := words
+	for len(ws) > 1 && genericWords[ws[len(ws)-1]] {
+		ws = ws[:len(ws)-1]
+		add(ws)
+	}
+	for _, w := range words {
+		if len(w) >= 3 && w != "and" && w != "the" && !legalWords[w] && !genericWords[w] {
+			add([]string{w})
+		}
+	}
+	return out
+}
+
 // Match returns the symbols of the companies the item names, in symbol order.
 // An item that names its own symbol (NSE announcements) is about that company
 // alone.

@@ -92,6 +92,15 @@ func (k Catalyst) holds(s scored) bool {
 	return s.Material >= k.MinMaterial && s.Direction >= k.MinDirection && s.Impact >= k.MinImpact && s.Direction > 0
 }
 
+// request is what Jev is sent about the pair: the state, anonymised when
+// the look-ahead control is on.
+func (p pair) request(anonymize bool) map[string]any {
+	if anonymize {
+		return p.anonymizedState()
+	}
+	return p.state()
+}
+
 func (p pair) state() map[string]any {
 	st := map[string]any{
 		"company":   p.stock.Name,
@@ -110,8 +119,8 @@ func (p pair) state() map[string]any {
 }
 
 // scoreOne asks Jev the three news questions about one pair.
-func scoreOne(ctx context.Context, a Asker, p pair) (scored, error) {
-	ans, err := a.Ask(ctx, p.state(), newsQuestions())
+func scoreOne(ctx context.Context, a Asker, p pair, anonymize bool) (scored, error) {
+	ans, err := a.Ask(ctx, p.request(anonymize), newsQuestions())
 	if err != nil {
 		return scored{}, err
 	}
@@ -132,7 +141,7 @@ const failFast = 5
 // scoreAll scores every pair with up to concurrency calls in flight. A pair
 // whose call fails is left out and counted; if the first failFast calls all
 // fail it stops and returns the error. Results keep the order of pairs.
-func scoreAll(ctx context.Context, a Asker, pairs []pair, concurrency int) (out []scored, failed int, err error) {
+func scoreAll(ctx context.Context, a Asker, pairs []pair, concurrency int, anonymize bool) (out []scored, failed int, err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	results := make([]*scored, len(pairs))
@@ -148,7 +157,7 @@ func scoreAll(ctx context.Context, a Asker, pairs []pair, concurrency int) (out 
 		go func() {
 			defer wg.Done()
 			for i := range next {
-				s, err := scoreOne(ctx, a, pairs[i])
+				s, err := scoreOne(ctx, a, pairs[i], anonymize)
 				if err != nil {
 					failN.Add(1)
 					mu.Lock()

@@ -25,15 +25,16 @@ const JevPricePerToken = jevPricePerToken
 
 // scoreNews fetches the news, maps it to the candidates, has Jev score it and
 // returns each symbol's news signal in [-1, 1], the items behind it, and the
-// symbols with a catalyst (see Catalyst; their net decayed news signal must also be positive). read is false when there was no news to score (or none could be), in which case the
+// symbols with a catalyst (see Catalyst; their net decayed news signal must also be positive), and how many
+// scored items each symbol has. read is false when there was no news to score (or none could be), in which case the
 // news signal is out of this run.
-func scoreNews(ctx context.Context, cfg Config, d Deps, cands []candidate, file *watchlist.File) (signal map[string]float64, refs map[string][]watchlist.NewsRef, catalyst map[string]bool, read bool) {
+func scoreNews(ctx context.Context, cfg Config, d Deps, cands []candidate, file *watchlist.File) (signal map[string]float64, refs map[string][]watchlist.NewsRef, catalyst map[string]bool, counts map[string]int, read bool) {
 	addSource := func(name, kind, status string, items int, detail string) {
 		file.Sources = append(file.Sources, watchlist.Source{Name: name, Kind: kind, Status: status, Items: items, Detail: detail})
 	}
 	if len(d.News) == 0 {
 		addSource("news", "news", watchlist.StatusSkipped, 0, "no news sources configured")
-		return nil, nil, nil, false
+		return nil, nil, nil, nil, false
 	}
 	end := cfg.Now
 	if cfg.Phase == watchlist.PhaseHistoric {
@@ -54,7 +55,7 @@ func scoreNews(ctx context.Context, cfg Config, d Deps, cands []candidate, file 
 	}
 	if okSources == 0 {
 		file.Notes = append(file.Notes, "No news source could be read; the news signal is not in the scores.")
-		return nil, nil, nil, false
+		return nil, nil, nil, nil, false
 	}
 	items := news.Dedupe(all)
 
@@ -90,33 +91,41 @@ func scoreNews(ctx context.Context, cfg Config, d Deps, cands []candidate, file 
 	}
 	if len(pairs) == 0 {
 		addSource("jev", "jev", watchlist.StatusSkipped, 0, fmt.Sprintf("no news about the screened stocks among %d items", len(items)))
-		return nil, nil, nil, false
+		return nil, nil, nil, nil, false
 	}
 	if d.Jev == nil {
 		addSource("jev", "jev", watchlist.StatusSkipped, 0, "no Jev client: the news was fetched but not scored")
 		file.Notes = append(file.Notes, "JEV_API_KEY was not available, so the news was not scored and is not in the scores.")
-		return nil, nil, nil, false
+		return nil, nil, nil, nil, false
 	}
 
 	// The second pass of the day finds most items already scored.
-	cache := openScoreCache(cfg.CacheDir, cfg.Date.In(watchlist.IST).Format(time.DateOnly))
+	cache := openScoreCache(cfg.CacheDir, cfg.Date.In(watchlist.IST).Format(time.DateOnly), cfg.AnonymizeNews)
 	var todo []pair
+	asking := map[string]bool{} // anonymised items of two companies can be the same request
 	for _, p := range pairs {
-		if _, ok := cache.get(d.Model, p); !ok {
+		if _, ok := cache.get(d.Model, p); ok {
+			continue
+		}
+		if k := cache.requestKey(d.Model, p); !asking[k] {
+			asking[k] = true
 			todo = append(todo, p)
 		}
 	}
-	fresh, failed, err := scoreAll(ctx, d.Jev, todo, cfg.NewsConcurrency)
+	fresh, failed, err := scoreAll(ctx, d.Jev, todo, cfg.NewsConcurrency, cfg.AnonymizeNews)
 	if err != nil && len(todo) == len(pairs) {
 		addSource("jev", "jev", watchlist.StatusFailed, 0, err.Error())
 		file.Notes = append(file.Notes, fmt.Sprintf("Jev could not score the news (%v); the news signal is not in the scores.", err))
-		return nil, nil, nil, false
+		return nil, nil, nil, nil, false
 	}
 	for _, s := range fresh {
 		cache.put(d.Model, s)
 	}
 	if err := cache.save(); err != nil {
 		d.Logger.Warn("news score cache not saved", "err", err)
+	}
+	if cfg.AnonymizeNews {
+		file.Notes = append(file.Notes, "News was scored anonymised: the company's name and symbol and every date were hidden from the text sent to Jev (the look-ahead control).")
 	}
 	var results []scored
 	for _, p := range pairs {
@@ -156,6 +165,10 @@ func scoreNews(ctx context.Context, cfg Config, d Deps, cands []candidate, file 
 	signal = map[string]float64{}
 	refs = map[string][]watchlist.NewsRef{}
 	catalyst = map[string]bool{}
+	counts = map[string]int{}
+	for _, s := range results {
+		counts[s.stock.Symbol]++
+	}
 	for _, s := range results {
 		if cfg.Catalyst.holds(s) && sums[s.stock.Symbol] > 0 {
 			catalyst[s.stock.Symbol] = true
@@ -169,7 +182,7 @@ func scoreNews(ctx context.Context, cfg Config, d Deps, cands []candidate, file 
 			refs[sym] = append(refs[sym], c.ref)
 		}
 	}
-	return signal, refs, catalyst, true
+	return signal, refs, catalyst, counts, true
 }
 
 func abs(x float64) float64 {
