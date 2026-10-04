@@ -67,13 +67,17 @@ func writeFixture(t *testing.T) string {
 
 func config(t *testing.T, root string, log *decisionlog.Log) Config {
 	t.Helper()
+	// These fixtures replay minutes of data, so they keep the pre-#53 churn rules.
+	limits := risk.DefaultLimits()
+	limits.MinHold, limits.ReentryCooldown, limits.RotationMinHold = 5*time.Minute, 10*time.Minute, 5*time.Minute
+	limits.EntryConfirmations, limits.EntryMinProbability = 0, 0
 	return Config{
 		Log: log,
 		NewSource: func() (marketdata.Source, error) {
 			return mdreplay.New(mdreplay.Config{Root: root, Kind: mdreplay.Ticks})
 		},
 		SourceName: "ticks", Label: "fixture ticks",
-		Limits: risk.DefaultLimits(), Paper: paper.DefaultConfig(), Bars: bars.Config{},
+		Limits: limits, Paper: paper.DefaultConfig(), Bars: bars.Config{},
 		Snapshot:   snapshot.Config{SizeThresholds: [2]float64{20_000, 50_000}},
 		IndexToken: nifty.Token, RunPrefix: "bt",
 	}
@@ -552,7 +556,7 @@ func TestReportTextAndJSONCarryWalkthroughAndComparison(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Trading window: 09:20-09:30 IST", "Walkthrough: momentum (bt-momentum)", "NSE:INFY: 10 decisions",
-		"DECIDE BUY  p=0.65", "FILL   BUY", "gate order_in_flight", "Comparison with the real market",
+		"DECIDE BUY  p=0.75", "FILL   BUY", "gate order_in_flight", "Comparison with the real market",
 		"BUY/SELL calls, bt-momentum", "window end", "day close", "Buy-and-hold benchmark", "vs buy-and-hold",
 	} {
 		if !strings.Contains(text.String(), want) {

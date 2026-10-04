@@ -57,6 +57,7 @@ func trade(ctx context.Context, args []string, e env) error {
 	watchlist := fs.String("watchlist", "", `comma-separated instruments, e.g. "NSE:INFY,NSE:TCS" (exact EXCHANGE:SYMBOL keys; required unless --watchlist-file is given, and the fallback when that file is missing or stale)`)
 	watchlistFile := fs.String("watchlist-file", "", "today's watchlist file written by `jevtrader screen` (e.g. state/watchlist/2026-10-05.json); used instead of --watchlist when it exists and is for today's IST date")
 	capitalFlag := fs.Float64("capital", 0, capitalFlagHelp)
+	rules := addTradingRuleFlags(fs)
 	indexKey := fs.String("index", "NSE:NIFTY 50", `index used as snapshot context and never traded; "" for none`)
 	model := fs.String("model", jev.DefaultModel, "pinned Jev model id (\"jev-latest\" is rejected)")
 	jevURL := fs.String("jev-url", "", "Jev base URL (default: the public API)")
@@ -89,10 +90,19 @@ func trade(ctx context.Context, args []string, e env) error {
 	case *buffer < 1:
 		return usageError{errors.New("--buffer must be positive")}
 	}
+	if err := rules.validate(); err != nil {
+		return usageError{err}
+	}
 	logger := slog.New(slog.NewTextHandler(e.stderr, nil))
 	symbols, err := resolveWatchlist(static, *watchlistFile, time.Now(), logger)
 	if err != nil {
 		return err
+	}
+
+	if len(symbols) == 0 {
+		logger.Info("the watchlist file lists no instruments (no news catalysts today); not trading, and not falling back to --watchlist", "path", *watchlistFile)
+		<-ctx.Done()
+		return nil
 	}
 
 	secrets, err := loadSecrets(ctx, e, config.EnvKiteAPIKey, config.EnvKiteAPISecret, config.EnvJevAPIKey)
@@ -106,8 +116,9 @@ func trade(ctx context.Context, args []string, e env) error {
 	if err != nil {
 		return err
 	}
-	limits := tradingLimits(capital)
+	limits := tradingLimits(capital, rules)
 	logCapital(logger, capital, limits)
+	logger.Info("trading rules", "rules", rules.String())
 	jevClient, err := newJev(secrets, *model, *jevURL)
 	if err != nil {
 		return usageError{err}
@@ -156,7 +167,7 @@ func trade(ctx context.Context, args []string, e env) error {
 		source: src, sourceName: "kite", decider: jevClient, deciderName: "jev",
 		logPath: *logPath, dataDir: *dataDir, stateDir: *stateDir,
 		indexToken: indexToken, record: *record, buffer: *buffer, decideTimeout: *decideTimeout,
-		limits: limits, clock: clock.Wall{}, logger: logger, instruments: len(symbols),
+		limits: limits, decideEvery: rules.decideEvery, clock: clock.Wall{}, logger: logger, instruments: len(symbols),
 	})
 }
 
@@ -228,6 +239,7 @@ type tradeConfig struct {
 	buffer        int
 	decideTimeout time.Duration
 	limits        risk.Limits
+	decideEvery   time.Duration // zero decides on every bar
 	clock         clock.Clock
 	logger        *slog.Logger
 	instruments   int // traded instruments, for the log
@@ -263,7 +275,7 @@ func tradeSession(ctx context.Context, rc tradeConfig) (err error) {
 	cfg := engine.Config{
 		RunID: rc.runID, Mode: rc.mode, DeciderName: rc.deciderName, SourceName: rc.sourceName,
 		Source: rc.source, Clock: rc.clock, Decider: rc.decider, Broker: broker, Gate: gate, Log: log,
-		Bars:       bars.Config{},
+		Bars: bars.Config{}, DecideEvery: rc.decideEvery,
 		Snapshot:   snapshot.Config{SizeThresholds: sizeThresholds(rc.limits)},
 		IndexToken: rc.indexToken, DecideTimeout: rc.decideTimeout, AdvanceEvery: time.Second,
 		EventBuffer: rc.buffer, Recorded: recorded, Logger: rc.logger,

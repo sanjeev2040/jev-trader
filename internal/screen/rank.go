@@ -13,10 +13,12 @@ type rankedEntry struct {
 	score   float64
 	contrib map[string]float64
 	signals map[string]float64
+	// catalyst is whether the stock has a news item that meets Config.Catalyst.
+	catalyst bool
 }
 
-// pick orders the scored candidates, applies the minimum score and the
-// per-sector cap, and builds the top N entries with their reasons.
+// pick orders the scored candidates, applies the catalyst requirement, the
+// minimum score and the per-sector cap, and builds the top N entries with their reasons.
 func pick(cfg Config, ranked []rankedEntry, refs map[string][]watchlist.NewsRef, sec sectorResult) []watchlist.Entry {
 	key := func(r rankedEntry) float64 {
 		if cfg.Direction == "both" {
@@ -35,6 +37,9 @@ func pick(cfg Config, ranked []rankedEntry, refs map[string][]watchlist.NewsRef,
 	for _, r := range ranked {
 		if len(out) == cfg.TopN || key(r) < cfg.MinScore {
 			break
+		}
+		if cfg.Catalyst.Require && !r.catalyst {
+			continue
 		}
 		sector := r.cand.stock.Industry
 		if cfg.MaxPerSector > 0 && perSector[sector] >= cfg.MaxPerSector {
@@ -66,6 +71,9 @@ func entry(cfg Config, rank int, r rankedEntry, refs []watchlist.NewsRef, sec se
 		}
 		return names[i] < names[j]
 	})
+	if r.catalyst {
+		e.Reasons = append(e.Reasons, "news catalyst: material, positive and large enough by Jev's scoring")
+	}
 	if cfg.Direction == "both" && r.score < 0 {
 		e.Reasons = append(e.Reasons, "short candidate: the signals point down")
 	}

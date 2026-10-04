@@ -78,9 +78,11 @@ type rig struct {
 }
 
 // testLimits are the default limits with a 200,000 budget, so a size-S entry is
-// 10,000 and the engine tests trade a few shares of a stock near 1,500.
+// 10,000 and the engine tests trade a few shares of a stock near 1,500. The
+// churn checks are off: these tests trade minutes apart on purpose.
 func testLimits() risk.Limits {
 	l := risk.DefaultLimits()
+	l.MinHold, l.ReentryCooldown, l.CostAware, l.EntryConfirmations, l.EntryMinProbability = 0, 0, false, 0, 0
 	l.CapitalBudget = 200_000
 	l.SizeFraction[domain.SizeS] = 0.05
 	return l
@@ -158,6 +160,33 @@ func countVerdict(cs []decisionlog.Cycle, verdict string) int {
 		}
 	}
 	return n
+}
+
+func TestCostAwareEntryReadsTheRangeTheEngineMarks(t *testing.T) {
+	r := newRig(t, scenarioTicks(infy, 1), momentum(t))
+	r.cfg.Gate = mustGate(t, func(l *risk.Limits) {
+		l.CapitalBudget = 200_000
+		l.SizeFraction[domain.SizeS] = 0.05
+		l.CostAware = true
+		l.CostMargin = 0.09 // the tape's ~28-rupee range cannot pay a 9% margin
+	})
+	r.run(t)
+	cs := cyclesOf(t, r.log, "run1")
+	if n := countVerdict(cs, string(risk.ReasonApproved)); n != 0 {
+		t.Errorf("approved cycles = %d, want none", n)
+	}
+	var seen bool
+	for _, c := range cs {
+		if c.Verdict == string(risk.ReasonCostEdge) {
+			seen = true
+			if !strings.Contains(c.VerdictDetail, "expected move") {
+				t.Errorf("detail %q does not show the expected move", c.VerdictDetail)
+			}
+		}
+	}
+	if !seen {
+		t.Error("expected a cost_edge refusal in the decision log")
+	}
 }
 
 func TestMomentumRunLogsEveryCycleAndTradesOnce(t *testing.T) {
@@ -670,6 +699,76 @@ func TestWindowIsValidated(t *testing.T) {
 		c.Window = w
 		if _, err := New(c); err == nil {
 			t.Errorf("%s: want an error", name)
+		}
+	}
+}
+
+func TestDecideEveryAsksOnlyOnTheCadence(t *testing.T) {
+	r := newRig(t, scenarioTicks(infy, 1), momentum(t))
+	r.cfg.DecideEvery = 5 * time.Minute
+	res := r.run(t)
+
+	// The 20 one-minute bars close 09:16 to 09:35; only 09:20, 09:25, 09:30 and 09:35 are on the cadence.
+	cs := cyclesOf(t, r.log, "run1")
+	if len(cs) != 4 || res.Cycles != 4 || res.Bars != 20 || res.OffCadence != 16 {
+		t.Fatalf("cycles %d (stats %d), bars %d, off cadence %d; want 4, 4, 20, 16", len(cs), res.Cycles, res.Bars, res.OffCadence)
+	}
+	for i, c := range cs {
+		if want := at(9, 20+5*i, 0); !c.BarClose.Equal(want) {
+			t.Errorf("cycle %d decided on the bar closing %v, want %v", i, c.BarClose, want)
+		}
+	}
+}
+
+func TestDecideEveryZeroDecidesOnEveryBar(t *testing.T) {
+	r := newRig(t, scenarioTicks(infy, 1), momentum(t))
+	if res := r.run(t); res.Cycles != 20 || res.OffCadence != 0 {
+		t.Fatalf("cycles %d, off cadence %d; want 20 and 0", res.Cycles, res.OffCadence)
+	}
+}
+
+func TestDecideEveryMustFitTheBaseAndTheHalfHour(t *testing.T) {
+	for _, d := range []time.Duration{-time.Minute, 90 * time.Second, 7 * time.Minute, 45 * time.Minute} {
+		r := newRig(t, nil, momentum(t))
+		r.cfg.DecideEvery = d
+		if _, err := New(r.cfg); err == nil {
+			t.Errorf("a %s cadence was accepted", d)
+		}
+	}
+	r := newRig(t, nil, momentum(t))
+	r.cfg.DecideEvery = 15 * time.Minute
+	if _, err := New(r.cfg); err != nil {
+		t.Errorf("a 15m cadence was refused: %v", err)
+	}
+}
+
+// A slow decision cadence never slows the risk exits: the square-off still
+// fires on the first tick at or after 15:10, whatever the decider was or was
+// not asked.
+func TestSquareOffIsImmediateOnASlowCadence(t *testing.T) {
+	evs := scenarioTicks(infy, 1)
+	for _, tk := range []domain.Tick{tickAt(infy, 15, 9, 30, 1522), tickAt(infy, 15, 10, 30, 1521), tickAt(infy, 15, 11, 30, 1520)} {
+		tk := tk
+		evs = append(evs, marketdata.Event{Tick: &tk})
+	}
+	calls := 0
+	d := deciderFunc(func(ctx context.Context, s json.RawMessage) (domain.Decision, error) {
+		if calls++; calls == 1 {
+			return domain.Decision{Action: domain.ActionBuy, Size: domain.SizeS, Probability: 0.9,
+				Probabilities: map[domain.Action]float64{domain.ActionBuy: 0.9, domain.ActionHold: 0.1}}, nil
+		}
+		return decide.AlwaysHold{}.Decide(ctx, s)
+	})
+	r := newRig(t, evs, d)
+	r.cfg.DecideEvery = 15 * time.Minute
+	res := r.run(t)
+
+	if res.Approved != 1 || res.Exits != 1 || len(res.Positions) != 0 {
+		t.Fatalf("approved %d, risk exits %d, open positions %d; want one entry, one square-off, flat", res.Approved, res.Exits, len(res.Positions))
+	}
+	for _, c := range cyclesOf(t, r.log, "run1") {
+		if c.Source == decisionlog.SourceRisk && !c.BarClose.Equal(at(15, 10, 30)) {
+			t.Errorf("square-off at %v, want the first tick at or after 15:10 IST", c.BarClose)
 		}
 	}
 }

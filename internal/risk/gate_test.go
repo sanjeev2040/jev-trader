@@ -36,6 +36,7 @@ func testLimits() Limits {
 	l := DefaultLimits()
 	l.CapitalBudget = 250_000
 	l.SizeFraction = map[string]float64{domain.SizeS: 0.04, domain.SizeM: 0.10, domain.SizeL: 0.20}
+	l.MinHold, l.ReentryCooldown, l.CostAware, l.EntryConfirmations, l.EntryMinProbability = 0, 0, false, 0, 0 // churn_test.go covers these
 	return l
 }
 
@@ -77,6 +78,11 @@ func TestNewGateRejectsInvalidLimits(t *testing.T) {
 		"position fraction above one": func(l *Limits) { l.MaxPositionFraction = 2 },
 		"rotation margin of one":      func(l *Limits) { l.RotationMargin = 1 },
 		"negative minimum hold":       func(l *Limits) { l.RotationMinHold = -time.Second },
+		"negative decider min hold":   func(l *Limits) { l.MinHold = -time.Second },
+		"negative reentry cooldown":   func(l *Limits) { l.ReentryCooldown = -time.Second },
+		"negative cost margin":        func(l *Limits) { l.CostMargin = -0.001 },
+		"cost margin of ten percent":  func(l *Limits) { l.CostMargin = 0.1 },
+		"cost check without a window": func(l *Limits) { l.CostAware = true; l.RangeWindow = 0 },
 		"zero position cap":           func(l *Limits) { l.MaxPositionNotional = 0 },
 		"gross below position cap":    func(l *Limits) { l.MaxGrossNotional = l.MaxPositionNotional - 1 },
 		"zero daily loss":             func(l *Limits) { l.MaxDailyLoss = 0 },

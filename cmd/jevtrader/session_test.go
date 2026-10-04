@@ -88,6 +88,7 @@ func TestBackfillSymbolsThenReplayTheSession(t *testing.T) {
 	replayArgs := []string{"replay", "--data-dir", dir, "--log", filepath.Join(t.TempDir(), "d.db"), "--source", "backfill",
 		"--from", "2026-10-05", "--to", "2026-10-05", "--start", "09:20", "--end", "09:30", "--deciders", "momentum",
 		"--walkthrough", "all", "--compare", "--lookahead", "5m,10m", "--format", "json", "--run-prefix", "s"}
+	replayArgs = append(replayArgs, minuteRules...)
 	if code := run(context.Background(), replayArgs, e); code != 0 {
 		t.Fatalf("replay exit %d: %s", code, stderr.String())
 	}

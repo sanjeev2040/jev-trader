@@ -35,6 +35,10 @@ type candidate struct {
 	gap   *float64 // percent; nil without a pre-open quote
 }
 
+// DailyLookbackDays is how many calendar days of daily candles the screen
+// reads before the screened day.
+const DailyLookbackDays = 45
+
 // minGapShare is the share of candidates whose quote must differ from the
 // previous close for the pre-open gap to count as read. Before pre-open prices
 // exist a quote repeats the last close, and a column of zeros is not a signal.
@@ -42,7 +46,8 @@ const minGapShare = 0.10
 
 // Run screens the universe and returns the watchlist file for cfg.Date. It
 // fails only when it cannot produce a list at all (no universe, no Kite candles,
-// no candidates); a source that fails otherwise costs its signal and is
+// no candidates, or a required catalyst with no news scored); a quiet day on
+// which no stock has a catalyst returns an empty list, not an error. A source that fails otherwise costs its signal and is
 // recorded in the file's Sources and Notes.
 func Run(ctx context.Context, cfg Config, d Deps) (watchlist.File, error) {
 	if err := cfg.Validate(); err != nil {
@@ -119,7 +124,7 @@ func Run(ctx context.Context, cfg Config, d Deps) (watchlist.File, error) {
 	file.Sectors = sectors.rows
 
 	// 5. News.
-	newsSignal, newsRefs, newsRead := scoreNews(ctx, cfg, d, cands, &file)
+	newsSignal, newsRefs, catalyst, newsRead := scoreNews(ctx, cfg, d, cands, &file)
 
 	// 6. Combine.
 	avail := map[string]bool{SignalRange: true, SignalNews: newsRead, SignalGap: gapRead, SignalSector: len(sectors.score) > 0}
@@ -138,11 +143,40 @@ func Run(ctx context.Context, cfg Config, d Deps) (watchlist.File, error) {
 			signals[SignalNews] = newsSignal[sym]
 		}
 		score, contrib := combine(cfg.Weights.asMap(), avail, signals)
-		ranked = append(ranked, rankedEntry{cand: c, score: score, contrib: contrib, signals: signals})
+		ranked = append(ranked, rankedEntry{cand: c, score: score, contrib: contrib, signals: signals, catalyst: catalyst[sym]})
+	}
+	if cfg.Catalyst.Require {
+		n := 0
+		for _, r := range ranked {
+			if r.catalyst {
+				n++
+			}
+		}
+		if newsRead {
+			note("A material positive news catalyst is required: %d of %d screened stocks have one.", n, len(ranked))
+		} else {
+			note("A material positive news catalyst is required but no news was scored, so no stock can be listed.")
+		}
 	}
 	file.Entries = pick(cfg, ranked, newsRefs, sectors)
+	if cfg.KeepPool {
+		for _, r := range ranked {
+			p := watchlist.PoolEntry{Key: r.cand.stock.Key(), Sector: r.cand.stock.Industry, Score: round(r.score, 3), Signals: map[string]float64{}}
+			for name, v := range r.signals {
+				p.Signals[name] = round(v, 3)
+			}
+			file.Pool = append(file.Pool, p)
+		}
+	}
 	if len(file.Entries) == 0 {
-		return file, fmt.Errorf("no stock scored above %.2f", cfg.MinScore)
+		switch {
+		case !cfg.Catalyst.Require:
+			return file, fmt.Errorf("no stock scored above %.2f", cfg.MinScore)
+		case !newsRead:
+			return file, errors.New("a news catalyst is required but no news could be scored")
+		}
+		file.Entries = []watchlist.Entry{}
+		note("No catalysts today: no stock has a material positive news item scoring above %.2f, so the list is empty.", cfg.MinScore)
 	}
 	for _, name := range []string{SignalNews, SignalGap, SignalSector} {
 		if !avail[name] {
@@ -161,7 +195,7 @@ func fetchCandles(ctx context.Context, cfg Config, d Deps, stocks []universe.Sto
 		return nil, err
 	}
 	day, _ := time.ParseInLocation(time.DateOnly, date, watchlist.IST)
-	from, to := day.AddDate(0, 0, -45), day.Add(-time.Second)
+	from, to := day.AddDate(0, 0, -DailyLookbackDays), day.Add(-time.Second)
 	out := make(map[string][]Candle, len(stocks))
 	var failed int
 	var firstErr error

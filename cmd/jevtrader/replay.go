@@ -63,6 +63,7 @@ func replayCmd(ctx context.Context, args []string, e env) error {
 	compare := fs.Bool("compare", false, "add the comparison with the real market: the price after each BUY/SELL, and PnL against buy-and-hold and the hold and momentum baselines (those two are replayed too)")
 	lookahead := fs.String("lookahead", "5m,15m,30m", "with --compare, how long after each BUY/SELL to check the price, comma-separated")
 	capitalFlag := fs.Float64("capital", 0, capitalFlagHelp)
+	rules := addTradingRuleFlags(fs)
 	deciders := fs.String("deciders", "hold,momentum", "comma-separated deciders: hold, momentum, jev, recorded:<run-id>")
 	logPath := fs.String("log", defaultDecisionLog, "decision log (SQLite) the replay runs are written to")
 	prefix := fs.String("run-prefix", "", "run id prefix; runs are <prefix>-<decider> (default: replay-<UTC time>)")
@@ -85,6 +86,9 @@ func replayCmd(ctx context.Context, args []string, e env) error {
 	}
 	if fs.NArg() > 0 {
 		return usageError{fmt.Errorf("unexpected arguments %q", fs.Args())}
+	}
+	if err := rules.validate(); err != nil {
+		return usageError{err}
 	}
 	if *format != "text" && *format != "json" {
 		return usageError{fmt.Errorf("--format %q is not text or json", *format)}
@@ -168,15 +172,16 @@ func replayCmd(ctx context.Context, args []string, e env) error {
 	if err != nil {
 		return err
 	}
-	limits := tradingLimits(capital)
+	limits := tradingLimits(capital, rules)
 	fmt.Fprintf(e.stderr, "jevtrader replay: capital budget ₹%.0f (%s: %s)\n", capital.Amount, capital.Source, capital.Detail)
+	fmt.Fprintf(e.stderr, "jevtrader replay: trading rules: %s\n", rules)
 	rep, err := replay.Run(ctx, replay.Config{
 		Log: log,
 		NewSource: func() (marketdata.Source, error) {
 			return mdreplay.New(cfg)
 		},
 		SourceName: string(cfg.Kind), Label: cfg.Label(),
-		Limits: limits, Paper: paper.DefaultConfig(), Bars: bars.Config{},
+		Limits: limits, Paper: paper.DefaultConfig(), Bars: bars.Config{}, DecideEvery: rules.decideEvery, Rules: rules.String(),
 		Snapshot:   snapshot.Config{SizeThresholds: sizeThresholds(limits)},
 		IndexToken: indexToken, RunPrefix: *prefix, Window: window,
 		Latency: *latency, DecideTimeout: *decideTimeout, Horizon: *horizon,

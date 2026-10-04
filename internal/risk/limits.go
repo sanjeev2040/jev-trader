@@ -20,6 +20,17 @@ const (
 // configured. The deployed value is the Key Vault secret trading-capital.
 const DefaultCapitalBudget = 25_000
 
+// The trade-for-hours defaults (issue #53). The picker study found Jev's calls
+// right 46-48% of the time over 5 to 30 minutes but 55% by the close, so the
+// bot holds for an hour at least, waits an hour before going back into a stock
+// it sold, and only enters on a call that is both strong and repeated.
+const (
+	DefaultMinHold             = 60 * time.Minute
+	DefaultReentryCooldown     = 60 * time.Minute
+	DefaultEntryMinProbability = 0.70
+	DefaultEntryConfirmations  = 2
+)
+
 // IST is India Standard Time. It has no daylight saving, so a fixed zone is
 // exact and needs no tzdata.
 var IST = time.FixedZone("IST", 5*60*60+30*60)
@@ -44,6 +55,17 @@ type Limits struct {
 	// MinProbability is the minimum probability of the chosen action, per
 	// action, for the gate to act on it.
 	MinProbability map[domain.Action]float64
+	// EntryMinProbability is a higher bar for opening or adding to a position:
+	// an entry needs at least this probability as well as MinProbability for
+	// its action. Exits keep MinProbability alone, so being more choosy about
+	// entering never makes a position harder to leave. Zero turns it off.
+	EntryMinProbability float64
+	// EntryConfirmations is how many consecutive decisions on an instrument
+	// must choose the same BUY or SELL, each at or above the entry threshold,
+	// before the gate acts on the last of them (ReasonUnconfirmed). A HOLD, the
+	// other action or a call below the threshold starts the count again, as
+	// does an approved entry and a new trading day. One or zero turns it off.
+	EntryConfirmations int
 
 	// CapitalBudget is the total capital, in rupees, the bot may have at work
 	// at once: the cost of the positions it opened plus its open buy orders,
@@ -73,6 +95,30 @@ type Limits struct {
 	// long a position must have been held before it can be rotated out.
 	RotationMargin  float64
 	RotationMinHold time.Duration
+
+	// MinHold is how long a position must have been held before a decider's
+	// exit is allowed; until then the gate refuses it (ReasonMinHold). It
+	// never delays a risk-driven exit: the square-off, the daily loss limit
+	// and the kill switch flatten the book at once. A position the book has no
+	// entry time for, such as one restored from the journal, is not held back.
+	// Zero turns the check off.
+	MinHold time.Duration
+	// ReentryCooldown is how long after the bot sells out of an instrument
+	// (an exit, a risk exit or a rotation) before it may open a new position
+	// in it again (ReasonCooldown). Zero turns the check off.
+	ReentryCooldown time.Duration
+
+	// CostAware turns on the cost-aware entry check: an entry is refused
+	// unless the expected move beats the round-trip costs plus a margin
+	// (ReasonCostEdge). The expected move, in rupees a share, is
+	// (2p - 1) x the instrument's price range over RangeWindow, where p is the
+	// decision's probability: a coin flip expects nothing and a certain call
+	// captures the whole recent range. The costs are CostReserveRate of the
+	// price and the margin is CostMargin of the price. The check does not run
+	// for an instrument the book has no price history for.
+	CostAware   bool
+	CostMargin  float64
+	RangeWindow time.Duration
 
 	// MaxDailyLoss halts new entries and flattens the book once the day's
 	// realized plus unrealized PnL reaches -MaxDailyLoss.
@@ -109,11 +155,18 @@ func DefaultLimits() Limits {
 			domain.SizeM: 0.10,
 			domain.SizeL: 0.20,
 		},
+		EntryMinProbability:      DefaultEntryMinProbability,
+		EntryConfirmations:       DefaultEntryConfirmations,
 		MaxPositionFraction:      0.20,
 		MaxPositionNotional:      50_000,
 		MaxGrossNotional:         200_000,
 		RotationMargin:           0.10,
-		RotationMinHold:          5 * time.Minute,
+		RotationMinHold:          DefaultMinHold,
+		MinHold:                  DefaultMinHold,
+		ReentryCooldown:          DefaultReentryCooldown,
+		CostAware:                true,
+		CostMargin:               0.0005,
+		RangeWindow:              30 * time.Minute,
 		MaxDailyLoss:             5_000,
 		MaxOrdersPerSecond:       3,
 		MaxOrdersPerMinute:       60,
@@ -174,6 +227,12 @@ func (l Limits) Validate() error {
 		}
 	}
 	positive("capital budget", l.CapitalBudget)
+	if !(l.EntryMinProbability == 0 || (l.EntryMinProbability > 0 && l.EntryMinProbability <= 1)) {
+		bad("entry min probability must be 0 (off) or in (0, 1], got %v", l.EntryMinProbability)
+	}
+	if l.EntryConfirmations < 0 {
+		bad("entry confirmations must not be negative, got %d", l.EntryConfirmations)
+	}
 	if !(l.CostReserveRate >= 0 && l.CostReserveRate < 0.1) {
 		bad("cost reserve rate must be in [0, 0.1), got %v", l.CostReserveRate)
 	}
@@ -187,6 +246,15 @@ func (l Limits) Validate() error {
 	}
 	if !(l.RotationMargin >= 0 && l.RotationMargin < 1) || l.RotationMinHold < 0 {
 		bad("rotation margin must be in [0, 1) and the minimum hold not negative, got %v and %s", l.RotationMargin, l.RotationMinHold)
+	}
+	if l.MinHold < 0 || l.ReentryCooldown < 0 {
+		bad("minimum hold and re-entry cooldown must not be negative, got %s and %s", l.MinHold, l.ReentryCooldown)
+	}
+	if !(l.CostMargin >= 0 && l.CostMargin < 0.1) {
+		bad("cost margin must be in [0, 0.1), got %v", l.CostMargin)
+	}
+	if l.CostAware && !(l.RangeWindow > 0 && l.RangeWindow <= rangeKeep) {
+		bad("range window must be in (0, %s] when the cost-aware check is on, got %s", rangeKeep, l.RangeWindow)
 	}
 	positive("max position notional", l.MaxPositionNotional)
 	positive("max gross notional", l.MaxGrossNotional)

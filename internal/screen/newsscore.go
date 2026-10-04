@@ -86,6 +86,12 @@ func (s scored) strength() float64 {
 	return s.Direction * math.Sqrt(clamp(s.Material, 0, 1)*clamp(s.Impact/maxImpact, 0, 1))
 }
 
+// holds reports whether the item is a catalyst: material, pointing up and
+// large enough, each by the thresholds of k.
+func (k Catalyst) holds(s scored) bool {
+	return s.Material >= k.MinMaterial && s.Direction >= k.MinDirection && s.Impact >= k.MinImpact && s.Direction > 0
+}
+
 func (p pair) state() map[string]any {
 	st := map[string]any{
 		"company":   p.stock.Name,

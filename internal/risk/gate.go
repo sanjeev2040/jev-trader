@@ -35,6 +35,10 @@ const (
 	ReasonRotation         Reason = "rotation"         // the budget is full: an open position is being sold to make room
 	ReasonOrderRate        Reason = "order_rate_limit"
 	ReasonDailyOrderBudget Reason = "daily_order_budget"
+	ReasonMinHold          Reason = "min_hold"          // a position is being sold before its minimum holding time
+	ReasonCooldown         Reason = "reentry_cooldown"  // the instrument was sold out of too recently to buy again
+	ReasonCostEdge         Reason = "cost_edge"         // the expected move does not beat the round-trip costs plus margin
+	ReasonUnconfirmed      Reason = "entry_unconfirmed" // the entry call has not yet been repeated by enough consecutive decisions
 )
 
 // Exit reasons that are not also verdict reasons.
@@ -122,9 +126,12 @@ func (g *Gate) Limits() Limits {
 //  1. kill switch;
 //  2. session window (new entries only);
 //  3. daily loss limit (new entries only);
-//  4. probability threshold for the chosen action;
-//  5. one order in flight per instrument, shorts, the position cap and the
-//     capital budget;
+//  4. probability threshold for the chosen action (an entry's is the higher
+//     EntryMinProbability) and, for an entry, EntryConfirmations consecutive
+//     decisions for the same action;
+//  5. one order in flight per instrument; an exit before the position's
+//     minimum holding time; an entry within the re-entry cooldown, shorts,
+//     the cost-aware check, the position cap and the capital budget;
 //  6. order-rate limits and the daily order budget.
 //
 // An instrument holding something the bot did not open is refused outright,
@@ -149,6 +156,7 @@ func (g *Gate) Evaluate(req Request, b *Book, now time.Time) Verdict {
 	d := req.Decision
 	switch d.Action {
 	case domain.ActionHold:
+		b.resetCalls(req.Instrument.Token)
 		return Verdict{Reason: ReasonHold, Detail: d.HoldReason}
 	case domain.ActionBuy, domain.ActionSell:
 	default:
@@ -177,9 +185,21 @@ func (g *Gate) Evaluate(req Request, b *Book, now time.Time) Verdict {
 	if !reduce && b.lossHalted {
 		return refuse(ReasonDailyLoss, "day PnL %.2f breached limit -%.2f", b.PnL(), l.MaxDailyLoss)
 	}
-	// 4. Probability threshold.
-	if minP := l.MinProbability[d.Action]; d.Probability < minP {
+	// 4. Probability threshold: an entry's is the higher of the two, and a call
+	// that clears it must then be repeated EntryConfirmations times running.
+	minP := l.MinProbability[d.Action]
+	if !reduce {
+		minP = max(minP, l.EntryMinProbability)
+	}
+	if d.Probability < minP {
+		b.resetCalls(token)
 		return refuse(ReasonBelowThreshold, "%s probability %.4f below %.4f", d.Action, d.Probability, minP)
+	}
+	if reduce {
+		b.resetCalls(token)
+	} else if n := b.noteCall(token, d.Action); n < l.EntryConfirmations {
+		return refuse(ReasonUnconfirmed, "%s at probability %.2f is call %d of %d needed in a row; a HOLD, the other action or a weaker call starts the count again",
+			d.Action, d.Probability, n, l.EntryConfirmations)
 	}
 	// 5. Position checks.
 	if b.InFlight(token) {
@@ -189,8 +209,16 @@ func (g *Gate) Evaluate(req Request, b *Book, now time.Time) Verdict {
 	var sized string
 	price := b.marks[token]
 	if reduce {
+		if e, ok := b.entries[token]; ok && l.MinHold > 0 && now.Sub(e.at) < l.MinHold {
+			return refuse(ReasonMinHold, "held %s of the minimum %s since the entry at %s; square-off, the loss limit and the kill switch still exit at once",
+				now.Sub(e.at).Round(time.Second), l.MinHold, e.at.In(l.Location).Format("15:04:05"))
+		}
 		qty = abs(pos)
 	} else {
+		if last, ok := b.exits[token]; ok && l.ReentryCooldown > 0 && now.Sub(last) < l.ReentryCooldown {
+			return refuse(ReasonCooldown, "sold out of token %d at %s, %s ago; re-entry allowed after %s",
+				token, last.In(l.Location).Format("15:04:05"), now.Sub(last).Round(time.Second), l.ReentryCooldown)
+		}
 		if d.Action == domain.ActionSell && !l.AllowShort {
 			return refuse(ReasonShortNotAllowed, "SELL with no long position and shorts disabled")
 		}
@@ -200,6 +228,11 @@ func (g *Gate) Evaluate(req Request, b *Book, now time.Time) Verdict {
 		}
 		if !(price > 0) {
 			return refuse(ReasonNoPrice, "no last price for token %d", token)
+		}
+		if l.CostAware {
+			if v, ok := g.costEdge(b, token, price, d.Probability, now); !ok {
+				return v
+			}
 		}
 		// At least one share, then clipped to the position cap and the free capital.
 		qty = max(int64(math.Floor(target/price)), 1)
@@ -248,10 +281,30 @@ func (g *Gate) Evaluate(req Request, b *Book, now time.Time) Verdict {
 	}
 	b.record(intent, now)
 	b.dayOrders++
-	if !reduce {
+	if reduce {
+		b.noteExit(token, now)
+	} else {
 		b.noteEntry(token, d.Probability, now)
+		b.resetCalls(token) // adding to the position needs fresh confirmation
 	}
 	return Verdict{Reason: ReasonApproved, Detail: sized, approval: newApproval(intent, SourceDecision, ReasonApproved, now)}
+}
+
+// costEdge checks that an entry's expected move beats the estimated round-trip
+// costs plus the margin. It returns the refusal and false if it does not.
+func (g *Gate) costEdge(b *Book, token uint32, price, p float64, now time.Time) (Verdict, bool) {
+	l := g.limits
+	r, ok := b.recentRange(token, now, l.RangeWindow)
+	if !ok {
+		return Verdict{}, true // no price history to judge by
+	}
+	move := (2*p - 1) * r
+	need := price * (l.CostReserveRate + l.CostMargin)
+	if move >= need {
+		return Verdict{}, true
+	}
+	return refuse(ReasonCostEdge, "expected move %.2f (2×%.2f−1 of a %.2f range over %s) is below round-trip costs and margin %.2f (%.2f%% of %.2f)",
+		move, p, r, l.RangeWindow, need, 100*(l.CostReserveRate+l.CostMargin), price), false
 }
 
 // rotate sells the bot's weakest eligible position to make room for the entry
@@ -305,6 +358,7 @@ func (g *Gate) rotate(req Request, b *Book, price float64, now time.Time) (Verdi
 	}
 	b.record(intent, now)
 	b.dayOrders++
+	b.noteExit(token, now)
 	detail := fmt.Sprintf("budget %.2f is full: selling %s (opened at probability %.2f) to make room for %s at probability %.2f",
 		l.CapitalBudget, victim.Instrument.Symbol, weakest, req.Instrument.Symbol, d.Probability)
 	return Verdict{Reason: ReasonRotation, Detail: detail, rotation: newApproval(intent, SourceRotation, ReasonRotation, now)}, true
@@ -361,6 +415,7 @@ func (g *Gate) Exits(b *Book, now time.Time) ExitPlan {
 			ReduceOnly: true,
 		}
 		b.record(intent, now)
+		b.noteExit(token, now)
 		plan.Approvals = append(plan.Approvals, newApproval(intent, SourceRisk, plan.Reason, now))
 	}
 	return plan
